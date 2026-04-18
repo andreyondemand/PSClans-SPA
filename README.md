@@ -33,7 +33,7 @@ These redirect to the SPA route equivalents:
 
 The SPA now uses live API communication with request throttling and TTL caching:
 
-- Worker API (`https://petsimulatorclansapi.andreybusinessacc6675.workers.dev`)
+- Worker API (`https://psclans-spa.cloudflare-6apm0.workers.dev`)
   - `/message`
   - `/pinned`
   - `/clans`
