@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pet Simulator Clans</title>
+    <meta content="Pet Simulator Clans" property="og:title" />
+    <meta
+      content="Track your Pet Simulator clan with advanced member tracking"
+      property="og:description"
+    />
+    <meta content="https://petsimulatorclans.com" property="og:url" />
+    <meta
+      content="./assets/images/clans.webp"
+      property="og:image"
+    />
+    <meta content="#0066ff" name="theme-color" />
+    <link
+      rel="icon"
+      type="image/x-icon"
+      href="./assets/images/clans.webp"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@0.1.1/dist/chartjs-adapter-moment.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@0.7.7/dist/chartjs-plugin-zoom.min.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a href="#/" class="brand-link" aria-label="Home">
+        <img
+          src="./assets/images/clans.webp"
+          alt="Pet Simulator Clans Logo"
+        />
+      </a>
+      <nav id="main-nav">
+        <a href="#/" data-route="/">Home</a>
+        <a href="#/clans" data-route="/clans">Clans</a>
+        <a href="#/enchants" data-route="/enchants">Enchants</a>
+      </nav>
+    </header>
+
+    <div class="message-extension hidden" id="topBar">petsimulatorclans.com</div>
+
+    <main id="app" class="app-shell" aria-live="polite"></main>
+
+    <div id="graph-popup" class="popup" aria-hidden="true">
+      <button id="close-popup" class="close-btn" aria-label="Close">&times;</button>
+      <div class="popup-content">
+        <h3>User Information</h3>
+        <p><strong>Username:</strong> <span id="popup-username"></span></p>
+        <p><strong>User ID:</strong> <span id="popup-userid"></span></p>
+        <p><strong>Joined:</strong> <span id="popup-joined"></span></p>
+        <p>
+          <strong
+            ><img
+              class="icon"
+              src="./assets/images/gold_star_1_outline.png"
+              alt="points"
+            />
+            Points:</strong
+          >
+          <span id="popup-points"></span>
+        </p>
+        <label for="timeframeDropdown">Select Time Interval:</label>
+        <select id="timeframeDropdown">
+          <option value="minute">Minutes</option>
+          <option value="hour">Hourly</option>
+          <option value="day">Daily</option>
+        </select>
+        <canvas id="pointsGraph" width="800" height="400"></canvas>
+      </div>
+    </div>
+
+    <footer class="bottom-nav">
+      <nav>
+        <p>
+          Information shown on Pet Simulator Clans is from the public Pet Simulator
+          99 and Pets GO! APIs maintained by the BIG Games team.
+          petsimulatorclans.com is not affiliated with BIG Games.
+        </p>
+      </nav>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
