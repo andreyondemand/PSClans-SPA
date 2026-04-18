@@ -9,6 +9,8 @@ const ASSET_BASE = "./assets/images";
 const PLAYER_ICON_FALLBACK = `${ASSET_BASE}/error.png`;
 const CACHE_PREFIX = "psc_http_cache_v1_";
 const WORKER_MIN_INTERVAL_MS = 180;
+const CLAN_HISTORY_PAGE_LIMIT = 2000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_TTL_MS = {
   message: 10 * 60 * 1000,
   pinned: 15 * 60 * 1000,
@@ -26,6 +28,8 @@ const navLinks = Array.from(document.querySelectorAll("#main-nav a"));
 const popupEl = document.getElementById("graph-popup");
 const closePopupBtn = document.getElementById("close-popup");
 const timeframeDropdown = document.getElementById("timeframeDropdown");
+const popupHistoryStatusEl = document.getElementById("popup-history-status");
+const popupLoadOlderBtn = document.getElementById("popup-load-older");
 
 const ROUTES = {
   HOME: "/",
@@ -41,6 +45,8 @@ const state = {
   popupClan: "",
   popupUserId: null,
   popupTimeline: [],
+  popupTimelineMeta: null,
+  popupHistoryLoading: false,
   activeBattle: "",
   trackedClans: null,
   trackedClansFetchedAt: 0,
@@ -66,6 +72,7 @@ timeframeDropdown.addEventListener("change", () => {
   }
   renderPopupGraph(timeframeDropdown.value);
 });
+popupLoadOlderBtn?.addEventListener("click", loadOlderPopupTimeline);
 
 window.addEventListener("hashchange", renderRoute);
 
@@ -516,10 +523,17 @@ async function renderClan(params, nonce) {
     }
 
     setLoadingElements(loadingEl, ["#member-changes-count", "#memberChangesCarousel", "#membersGrid", "#membersTable", "#points-gained-day"]);
-    const history = await fetchClanHistory(clanLower);
-    document.getElementById("points-gained-day").textContent = `${formatNumber(
-      getClanPointsGainedLastDay(history, currentBattle?.Points || 0)
-    )} points`;
+    const historyPage = await fetchClanHistoryPage(clanLower, { limit: CLAN_HISTORY_PAGE_LIMIT });
+    const history = historyPage.history;
+    const has24hCoverage = hasHistoryCoverage(history, DAY_MS);
+    if (has24hCoverage) {
+      document.getElementById("points-gained-day").textContent = `${formatNumber(
+        getClanPointsGainedLastDay(history, currentBattle?.Points || 0)
+      )} points`;
+    } else {
+      const partialSuffix = historyPage.meta.hasMore ? " (partial history loaded)" : "";
+      document.getElementById("points-gained-day").textContent = `Not enough history${partialSuffix}`;
+    }
 
     const changes = await fetchClanChanges(clanLower);
     document.getElementById("member-changes-count").textContent = formatNumber(countRecentChanges(changes));
@@ -1256,6 +1270,17 @@ function buildClanPointSnapshots(history) {
   return snapshots;
 }
 
+function hasHistoryCoverage(history, windowMs) {
+  const snapshots = buildClanPointSnapshots(history);
+  if (snapshots.length < 2) {
+    return false;
+  }
+
+  const first = snapshots[0].timestampMs;
+  const last = snapshots[snapshots.length - 1].timestampMs;
+  return last - first >= windowMs;
+}
+
 function estimateRatePair(ourHistory, ourCurrentPoints, otherHistory, otherCurrentPoints) {
   for (const windowMinutes of [60, 30]) {
     const ourRate = estimateRateForWindow(ourHistory, ourCurrentPoints, windowMinutes);
@@ -1334,6 +1359,7 @@ function formatDuration(ms) {
 async function openPopupForMember(userId, username, clanData, clanLower, members, currentPoints) {
   state.popupUserId = userId;
   state.popupClan = clanLower;
+  state.popupHistoryLoading = false;
 
   document.getElementById("popup-username").textContent = username;
   document.getElementById("popup-userid").innerHTML = `<a href="https://www.roblox.com/users/${userId}/profile" target="_blank" rel="noopener noreferrer">${userId}</a>`;
@@ -1345,11 +1371,14 @@ async function openPopupForMember(userId, username, clanData, clanLower, members
 
   document.getElementById("popup-points").textContent = formatNumber(currentPoints);
 
-  state.popupTimeline = await fetchClanUserTimeline(clanLower, userId);
+  const timelinePage = await fetchClanUserTimelinePage(clanLower, userId, { limit: CLAN_HISTORY_PAGE_LIMIT });
+  state.popupTimeline = timelinePage.timeline;
+  state.popupTimelineMeta = timelinePage.meta;
 
   timeframeDropdown.value = "minute";
   popupEl.style.display = "block";
   popupEl.setAttribute("aria-hidden", "false");
+  updatePopupHistoryStatus();
 
   renderPopupGraph("minute");
 }
@@ -1432,6 +1461,88 @@ function collapseTimeline(timeline, timeframe) {
 function closePopup() {
   popupEl.style.display = "none";
   popupEl.setAttribute("aria-hidden", "true");
+  state.popupUserId = null;
+  state.popupClan = "";
+  state.popupTimeline = [];
+  state.popupTimelineMeta = null;
+  state.popupHistoryLoading = false;
+  updatePopupHistoryStatus();
+}
+
+async function loadOlderPopupTimeline() {
+  if (!state.popupUserId || !state.popupClan || !state.popupTimelineMeta?.hasMore || state.popupHistoryLoading) {
+    return;
+  }
+
+  const before = state.popupTimelineMeta.oldestTimestamp;
+  if (!before) {
+    return;
+  }
+
+  state.popupHistoryLoading = true;
+  updatePopupHistoryStatus();
+
+  const requestUserId = state.popupUserId;
+  const requestClan = state.popupClan;
+  try {
+    const olderPage = await fetchClanUserTimelinePage(requestClan, requestUserId, {
+      limit: CLAN_HISTORY_PAGE_LIMIT,
+      before,
+    });
+
+    if (state.popupUserId !== requestUserId || state.popupClan !== requestClan) {
+      return;
+    }
+
+    state.popupTimeline = mergeTimelinePages(olderPage.timeline, state.popupTimeline);
+    state.popupTimelineMeta = olderPage.meta;
+    renderPopupGraph(timeframeDropdown.value);
+  } catch {
+  } finally {
+    state.popupHistoryLoading = false;
+    updatePopupHistoryStatus();
+  }
+}
+
+function updatePopupHistoryStatus() {
+  if (!popupHistoryStatusEl || !popupLoadOlderBtn) {
+    return;
+  }
+
+  if (!state.popupUserId) {
+    popupHistoryStatusEl.textContent = "";
+    popupLoadOlderBtn.classList.add("hidden");
+    return;
+  }
+
+  if (state.popupHistoryLoading) {
+    popupHistoryStatusEl.textContent = "Partial history loaded. Loading older...";
+    popupLoadOlderBtn.classList.remove("hidden");
+    popupLoadOlderBtn.disabled = true;
+    return;
+  }
+
+  if (state.popupTimelineMeta?.hasMore && state.popupTimelineMeta.oldestTimestamp) {
+    popupHistoryStatusEl.textContent = "Partial history loaded.";
+    popupLoadOlderBtn.classList.remove("hidden");
+    popupLoadOlderBtn.disabled = false;
+    return;
+  }
+
+  popupHistoryStatusEl.textContent = "Full available history loaded.";
+  popupLoadOlderBtn.classList.add("hidden");
+}
+
+function mergeTimelinePages(olderEntries, newerEntries) {
+  const merged = new Map();
+  [...(olderEntries || []), ...(newerEntries || [])].forEach((entry) => {
+    if (!entry?.timestamp) {
+      return;
+    }
+    const key = `${entry.timestamp}:${entry.Points}`;
+    merged.set(key, entry);
+  });
+  return Array.from(merged.values()).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 }
 
 async function fetchTrackedClans() {
@@ -1532,23 +1643,60 @@ async function fetchClanChanges(clanLower) {
   return [];
 }
 
-async function fetchClanHistory(clanLower) {
+async function fetchClanHistoryPage(clanLower, options = {}) {
+  const params = new URLSearchParams({ clan: clanLower });
+  const limit = Number(options.limit);
+  if (Number.isFinite(limit) && limit > 0) {
+    params.set("limit", String(Math.floor(limit)));
+  }
+  if (options.before) {
+    params.set("before", String(options.before));
+  }
+  if (Number.isFinite(Number(options.userId))) {
+    params.set("userId", String(Number(options.userId)));
+  }
+
+  const cacheKeyParts = [
+    "clan_history",
+    clanLower,
+    `limit:${params.get("limit") || "default"}`,
+    `before:${params.get("before") || "none"}`,
+    `user:${params.get("userId") || "all"}`,
+  ];
+  const cacheKey = cacheKeyParts.join("_");
+
   try {
-    const payload = await fetchJSONCached(`${WORKER_API}/clan?clan=${encodeURIComponent(clanLower)}`, {
-      cacheKey: `clan_history_${clanLower}`,
+    const payload = await fetchJSONCached(`${WORKER_API}/clan?${params.toString()}`, {
+      cacheKey,
       ttlMs: CACHE_TTL_MS.clanHistory,
     });
     const history = normalizeHistoryPayload(payload, clanLower);
-    return history;
+    const meta = normalizeHistoryMeta(payload?.meta, history);
+    return { history, meta };
   } catch {}
 
-  return [];
+  return { history: [], meta: normalizeHistoryMeta(null, []) };
 }
 
-async function fetchClanUserTimeline(clanLower, userId) {
-  const history = await fetchClanHistory(clanLower);
-  return history
+async function fetchClanHistory(clanLower, options = {}) {
+  const { history } = await fetchClanHistoryPage(clanLower, options);
+  return history;
+}
+
+async function fetchClanUserTimelinePage(clanLower, userId, options = {}) {
+  const { history, meta } = await fetchClanHistoryPage(clanLower, {
+    ...options,
+    userId,
+  });
+  const timeline = history
     .map((entry) => {
+      if (Number.isFinite(Number(entry?.Points))) {
+        return {
+          timestamp: entry.timestamp,
+          Points: Number(entry.Points),
+        };
+      }
+
       const cont = (entry?.data?.PointContributions || []).find((candidate) => candidate.UserID === userId);
       if (!cont) {
         return null;
@@ -1560,6 +1708,7 @@ async function fetchClanUserTimeline(clanLower, userId) {
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  return { timeline, meta };
 }
 
 async function fetchActiveBattleName() {
@@ -1746,6 +1895,22 @@ function normalizeHistoryPayload(payload, clanLower) {
   }
 
   return [];
+}
+
+function normalizeHistoryMeta(meta, history) {
+  const fallbackOldest = history[0]?.timestamp || null;
+  const fallbackNewest = history[history.length - 1]?.timestamp || null;
+  const hasMore = Boolean(meta?.hasMore);
+  const limit = Number.isFinite(Number(meta?.limit)) ? Number(meta.limit) : null;
+  const returned = Number.isFinite(Number(meta?.returned)) ? Number(meta.returned) : history.length;
+  return {
+    hasMore,
+    limit,
+    returned,
+    before: meta?.before || null,
+    oldestTimestamp: meta?.oldestTimestamp || fallbackOldest,
+    newestTimestamp: meta?.newestTimestamp || fallbackNewest,
+  };
 }
 
 async function resolveAssetIconsBatch(assetIds, options = {}) {
