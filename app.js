@@ -6,6 +6,7 @@ const ROPROXY_USERS = "https://users.roproxy.com/v1";
 const ROPROXY_THUMBS = "https://thumbnails.roproxy.com/v1";
 const WORKER_API = "https://petsimulatorclansapi.andreybusinessacc6675.workers.dev";
 const ASSET_BASE = "./assets/images";
+const PLAYER_ICON_FALLBACK = `${ASSET_BASE}/error.png`;
 const CACHE_PREFIX = "psc_http_cache_v1_";
 const WORKER_MIN_INTERVAL_MS = 180;
 const CACHE_TTL_MS = {
@@ -643,12 +644,12 @@ async function renderPlayers(params, nonce) {
     contributions.forEach((entry, idx) => {
       const userId = entry.UserID;
       const username = usernameMap[userId] || String(userId);
-      const avatar = state.userAvatarCache.get(userId) || `${ASSET_BASE}/me.png`;
+      const avatar = state.userAvatarCache.get(userId) || PLAYER_ICON_FALLBACK;
 
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML = `
-        <img src="${avatar}" alt="${escapeHtml(username)}" />
+        <img src="${avatar}" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
         <h4 class="player-place">#${idx + 1}</h4>
         <p class="player-name">${escapeHtml(username)}</p>
         <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(entry.Points)} Points</p>
@@ -865,12 +866,12 @@ async function populateMemberChangesCarousel(changes, clanLower, nonce, onProgre
   carousel.innerHTML = "";
   sorted.forEach((change) => {
     const username = usernameMap[change.UserID] || String(change.UserID);
-    const avatar = state.userAvatarCache.get(change.UserID) || `${ASSET_BASE}/me.png`;
+    const avatar = state.userAvatarCache.get(change.UserID) || PLAYER_ICON_FALLBACK;
 
     const entry = document.createElement("div");
     entry.className = "member-change-entry";
     entry.innerHTML = `
-      <img src="${avatar}" class="user-image" alt="${escapeHtml(username)}" />
+      <img src="${avatar}" class="user-image" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
       <div class="member-info">
         <p><strong>Username:</strong> ${escapeHtml(username)}</p>
         <p><strong>Status:</strong> ${escapeHtml(change.type || "unknown")}</p>
@@ -923,7 +924,7 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
   rows.forEach((member, idx) => {
     const username = usernameMap[member.UserID] || String(member.UserID);
     const gained = getGainedLastDay(member.UserID, member.Points, timelineMap);
-    const avatar = state.userAvatarCache.get(member.UserID) || `${ASSET_BASE}/me.png`;
+    const avatar = state.userAvatarCache.get(member.UserID) || PLAYER_ICON_FALLBACK;
 
     const card = document.createElement("div");
     card.className = "card";
@@ -933,7 +934,7 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
     }
 
     card.innerHTML = `
-      <img src="${avatar}" alt="${escapeHtml(username)}" />
+      <img src="${avatar}" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
       <h4 class="player-place">#${idx + 1}</h4>
       <p class="player-name">${escapeHtml(username)}</p>
       <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(member.Points)} Points</p>
@@ -1433,9 +1434,9 @@ async function resolveUserAvatarsBatch(userIds, options = {}) {
       `${ROPROXY_THUMBS}/users/avatar-headshot?userIds=${encodeURIComponent(query)}&size=180x180&format=Png&isCircular=false`
     ).catch(() => null);
 
-    const byId = new Map((payload?.data || []).map((entry) => [entry.targetId, entry.imageUrl || `${ASSET_BASE}/me.png`]));
+    const byId = new Map((payload?.data || []).map((entry) => [entry.targetId, entry.imageUrl || PLAYER_ICON_FALLBACK]));
     chunk.forEach((id) => {
-      state.userAvatarCache.set(id, byId.get(id) || `${ASSET_BASE}/me.png`);
+      state.userAvatarCache.set(id, byId.get(id) || PLAYER_ICON_FALLBACK);
       if (onProgress) {
         onProgress(`avatar image for ${labelById(id)}`);
       }
