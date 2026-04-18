@@ -5,7 +5,7 @@ const DEFAULT_MAX_RETRIES = 4;
 const BASE_BACKOFF_MS = 400;
 const MAX_BACKOFF_MS = 8000;
 const DEFAULT_MIN_REQUEST_INTERVAL_MS = 120;
-const LOCAL_CACHE_TTL_MS = 60 * 1000;
+const LOCAL_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_CLAN_FETCHES_PER_RUN = 30;
 const MAX_CHANGES_BATCH_CLANS = 30;
 const MAX_CLAN_HISTORY_LIMIT = 2000;
@@ -387,13 +387,14 @@ async function fetchClanUsernames(clanName, headers) {
     return new Response(JSON.stringify(localCached), { status: 200, headers });
   }
 
-  let cachedUsers = [];
   const kvCached = await USERNAMES.get(cacheKey);
   if (kvCached) {
-    cachedUsers = JSON.parse(kvCached);
+    const parsed = JSON.parse(kvCached);
+    const cachedUsers = Array.isArray(parsed) ? parsed : [];
+    setLocalCache(cacheKey, cachedUsers);
+    return new Response(JSON.stringify(cachedUsers), { status: 200, headers });
   }
 
-  const cachedUserIDs = cachedUsers.map((user) => user.id);
   const response = await fetchWithRateLimit(`https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`);
   if (!response.ok) {
     return new Response("Failed to fetch clan data", { status: 502, headers });
@@ -404,17 +405,11 @@ async function fetchClanUsernames(clanName, headers) {
   const ownerID = clanData?.data?.Owner;
   const currentUserIDs = [ownerID, ...members.map((member) => member.UserID)].filter(Number.isFinite);
 
-  const newUserIDs = currentUserIDs.filter((id) => !cachedUserIDs.includes(id));
-  const removedUserIDs = cachedUserIDs.filter((id) => !currentUserIDs.includes(id));
+  const resolvedUsers = await resolveUsernames(currentUserIDs);
+  await USERNAMES.put(cacheKey, JSON.stringify(resolvedUsers), { expirationTtl: CACHE_TTL_SECONDS });
+  setLocalCache(cacheKey, resolvedUsers);
 
-  const newUsers = await resolveUsernames(newUserIDs);
-  cachedUsers = cachedUsers.filter((user) => !removedUserIDs.includes(user.id));
-  cachedUsers.push(...newUsers);
-
-  await USERNAMES.put(cacheKey, JSON.stringify(cachedUsers), { expirationTtl: CACHE_TTL_SECONDS });
-  setLocalCache(cacheKey, cachedUsers);
-
-  return new Response(JSON.stringify(cachedUsers), { status: 200, headers });
+  return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
 }
 
 async function resolveUsernames(userIDs) {
