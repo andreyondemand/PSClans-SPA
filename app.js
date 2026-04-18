@@ -18,6 +18,7 @@ const CACHE_TTL_MS = {
   clanUsernames: 6 * 60 * 60 * 1000,
   usernameById: 24 * 60 * 60 * 1000,
 };
+const USERNAME_BATCH_SIZE = 100;
 
 const appEl = document.getElementById("app");
 const topBarEl = document.getElementById("topBar");
@@ -410,6 +411,7 @@ async function renderClan(params, nonce) {
             <p><strong><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> Battle Points:</strong> <span id="battle-points"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/uparrow.png" alt="daily" /> Points gained in the last 24 hours:</strong> <span id="points-gained-day"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/uparrow.png" alt="up" /> Points needed to surpass next clan:</strong> <span id="points-needed"></span></p>
+            <p><strong><img class="icon" src="${ASSET_BASE}/clock.png" alt="eta" /> Estimated time to pass next clan (rate-adjusted):</strong> <span id="points-time-estimate"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/downarrow.png" alt="down" /> Points needed for lower clan to surpass us:</strong> <span id="points-needed2"></span></p>
           </div>
         </div>
@@ -506,8 +508,8 @@ async function renderClan(params, nonce) {
     const changes = await fetchClanChanges(clanLower);
     document.getElementById("member-changes-count").textContent = formatNumber(countRecentChanges(changes));
 
-    setLoadingElements(loadingEl, ["#points-needed", "#points-needed2"]);
-    await populatePointsNeeded(clanLower);
+    setLoadingElements(loadingEl, ["#points-needed", "#points-time-estimate", "#points-needed2"]);
+    await populatePointsNeeded(clanLower, history);
     setLoadingElements(loadingEl, ["#memberChangesCarousel"]);
     await populateMemberChangesCarousel(changes, clanLower, nonce, (label) => setLoadingItem(loadingEl, label));
     populatePreviousBattles(clanData, activeBattle);
@@ -826,8 +828,9 @@ function getMedalIcon(index) {
   return "";
 }
 
-async function populatePointsNeeded(clanLower) {
+async function populatePointsNeeded(clanLower, currentClanHistory = null) {
   const pointsNeeded = document.getElementById("points-needed");
+  const pointsTimeEstimate = document.getElementById("points-time-estimate");
   const pointsNeeded2 = document.getElementById("points-needed2");
 
   try {
@@ -836,15 +839,38 @@ async function populatePointsNeeded(clanLower) {
 
     if (idx < 0 || idx >= leaderboard.length) {
       pointsNeeded.textContent = "N/A";
+      pointsTimeEstimate.textContent = "N/A";
       pointsNeeded2.textContent = "N/A";
       return;
     }
 
     if (idx === 0) {
       pointsNeeded.textContent = "None";
+      pointsTimeEstimate.textContent = "Already rank #1";
     } else {
-      const needed = Math.max(leaderboard[idx - 1].Points - leaderboard[idx].Points, 0);
-      pointsNeeded.textContent = `${formatNumber(needed)} Points needed to pass ${leaderboard[idx - 1].Name}`;
+      const currentClan = leaderboard[idx];
+      const nextClan = leaderboard[idx - 1];
+      const needed = Math.max(nextClan.Points - currentClan.Points + 1, 1);
+      pointsNeeded.textContent = `${formatNumber(needed)} Points needed to pass ${nextClan.Name}`;
+
+      const ourHistory = Array.isArray(currentClanHistory) ? currentClanHistory : await fetchClanHistory(clanLower);
+      const nextHistory = await fetchClanHistory(nextClan.Name.toLowerCase());
+      const ratePair = estimateRatePair(ourHistory, currentClan.Points, nextHistory, nextClan.Points);
+
+      if (!ratePair) {
+        pointsTimeEstimate.textContent = "Not enough recent history (30-60m) to estimate";
+      } else {
+        const closingRatePerMs = ratePair.current.ratePerMs - ratePair.next.ratePerMs;
+        const currentRateLabel = formatRatePerHour(ratePair.current.ratePerMs);
+        const nextRateLabel = formatRatePerHour(ratePair.next.ratePerMs);
+
+        if (closingRatePerMs <= 0) {
+          pointsTimeEstimate.textContent = `Not possible at current pace (${currentRateLabel} vs ${nextRateLabel})`;
+        } else {
+          const etaMs = needed / closingRatePerMs;
+          pointsTimeEstimate.textContent = `${formatDuration(etaMs)} (you: ${currentRateLabel}, ${nextClan.Name}: ${nextRateLabel}, ${ratePair.windowMinutes}m window)`;
+        }
+      }
     }
 
     if (idx === leaderboard.length - 1) {
@@ -855,6 +881,7 @@ async function populatePointsNeeded(clanLower) {
     }
   } catch (error) {
     pointsNeeded.textContent = "N/A";
+    pointsTimeEstimate.textContent = "N/A";
     pointsNeeded2.textContent = "N/A";
   }
 }
@@ -1167,6 +1194,26 @@ function getClanPointsGainedLastDay(history, currentPoints) {
 }
 
 function getClanPointsGainedSince(history, currentPoints, windowMs) {
+  const snapshots = buildClanPointSnapshots(history);
+  if (snapshots.length === 0) {
+    return 0;
+  }
+
+  const cutoff = Date.now() - windowMs;
+  const recent = snapshots.find((snapshot) => snapshot.timestampMs >= cutoff);
+  if (!recent) {
+    return 0;
+  }
+
+  const numericCurrent = Number(currentPoints);
+  if (!Number.isFinite(numericCurrent)) {
+    return 0;
+  }
+
+  return Math.max(numericCurrent - recent.points, 0);
+}
+
+function buildClanPointSnapshots(history) {
   const snapshots = (history || [])
     .map((entry) => {
       const timestampMs = new Date(entry?.timestamp).getTime();
@@ -1190,22 +1237,82 @@ function getClanPointsGainedSince(history, currentPoints, windowMs) {
     .filter(Boolean)
     .sort((a, b) => a.timestampMs - b.timestampMs);
 
+  return snapshots;
+}
+
+function estimateRatePair(ourHistory, ourCurrentPoints, otherHistory, otherCurrentPoints) {
+  for (const windowMinutes of [60, 30]) {
+    const ourRate = estimateRateForWindow(ourHistory, ourCurrentPoints, windowMinutes);
+    const otherRate = estimateRateForWindow(otherHistory, otherCurrentPoints, windowMinutes);
+    if (ourRate && otherRate) {
+      return {
+        windowMinutes,
+        current: ourRate,
+        next: otherRate,
+      };
+    }
+  }
+
+  return null;
+}
+
+function estimateRateForWindow(history, currentPoints, windowMinutes) {
+  const windowMs = windowMinutes * 60 * 1000;
+  const snapshots = buildClanPointSnapshots(history);
   if (snapshots.length === 0) {
-    return 0;
+    return null;
   }
 
   const cutoff = Date.now() - windowMs;
   const recent = snapshots.find((snapshot) => snapshot.timestampMs >= cutoff);
   if (!recent) {
-    return 0;
+    return null;
   }
 
   const numericCurrent = Number(currentPoints);
   if (!Number.isFinite(numericCurrent)) {
-    return 0;
+    return null;
   }
 
-  return Math.max(numericCurrent - recent.points, 0);
+  const elapsedMs = Date.now() - recent.timestampMs;
+  if (elapsedMs <= 0) {
+    return null;
+  }
+
+  const gained = Math.max(numericCurrent - recent.points, 0);
+  return {
+    gained,
+    elapsedMs,
+    ratePerMs: gained / elapsedMs,
+  };
+}
+
+function formatRatePerHour(ratePerMs) {
+  return `${formatNumber(Math.round(Math.max(ratePerMs, 0) * 60 * 60 * 1000))} pts/hour`;
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "N/A";
+  }
+
+  let totalSeconds = Math.ceil(ms / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  totalSeconds %= 86400;
+  const hours = Math.floor(totalSeconds / 3600);
+  totalSeconds %= 3600;
+  const minutes = Math.floor(totalSeconds / 60);
+
+  if (days === 0 && hours === 0 && minutes === 0) {
+    return "<1m";
+  }
+  if (days > 0) {
+    return `${days}d ${hours}h ${minutes}m`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
 }
 
 async function openPopupForMember(userId, username, clanData, clanLower, members, currentPoints) {
@@ -1488,7 +1595,15 @@ async function resolveUsernamesBatch(userIds, options = {}) {
     return result;
   }
 
-  for (const id of missing) {
+  const batchResolved = await resolveUsernamesViaUsersApi(missing, { onProgress });
+  Object.assign(result, batchResolved);
+
+  const stillMissing = missing.filter((id) => !result[id]);
+  if (stillMissing.length === 0) {
+    return result;
+  }
+
+  for (const id of stillMissing) {
     const storageKey = `psc_username_${id}`;
     const saved = localStorage.getItem(storageKey);
     if (saved) {
@@ -1516,6 +1631,47 @@ async function resolveUsernamesBatch(userIds, options = {}) {
   }
 
   return result;
+}
+
+async function resolveUsernamesViaUsersApi(userIds, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const resolved = {};
+  const chunks = chunkArray(userIds, USERNAME_BATCH_SIZE);
+
+  for (const chunk of chunks) {
+    const cacheSuffix = [...chunk].sort((a, b) => a - b).join("_");
+    const payload = await fetchJSONCached(`${ROPROXY_USERS}/users`, {
+      cacheKey: `username_batch_${cacheSuffix}`,
+      ttlMs: CACHE_TTL_MS.usernameById,
+      fetchOptions: {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          userIds: chunk,
+          excludeBannedUsers: false,
+        }),
+      },
+    }).catch(() => null);
+
+    const users = Array.isArray(payload?.data) ? payload.data : [];
+    users.forEach((user) => {
+      const userId = Number(user?.id);
+      const username = typeof user?.name === "string" ? user.name : "";
+      if (!Number.isFinite(userId) || !username) {
+        return;
+      }
+      resolved[userId] = username;
+      state.usernameCache.set(userId, username);
+      localStorage.setItem(`psc_username_${userId}`, username);
+      if (onProgress) {
+        onProgress(`username @${username} (user ${userId})`);
+      }
+    });
+  }
+
+  return resolved;
 }
 
 function normalizeChangesPayload(payload, clanLower) {
