@@ -408,6 +408,7 @@ async function renderClan(params, nonce) {
             <p><strong><img class="icon" src="${ASSET_BASE}/clans.webp" alt="level" /> Clan Level:</strong> <span id="guild-level"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/clock.png" alt="kick" /> Kick Cooldown:</strong> <span id="kick-time"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> Battle Points:</strong> <span id="battle-points"></span></p>
+            <p><strong><img class="icon" src="${ASSET_BASE}/uparrow.png" alt="daily" /> Points gained in the last 24 hours:</strong> <span id="points-gained-day"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/uparrow.png" alt="up" /> Points needed to surpass next clan:</strong> <span id="points-needed"></span></p>
             <p><strong><img class="icon" src="${ASSET_BASE}/downarrow.png" alt="down" /> Points needed for lower clan to surpass us:</strong> <span id="points-needed2"></span></p>
           </div>
@@ -496,8 +497,11 @@ async function renderClan(params, nonce) {
       document.getElementById("kick-time").textContent = "N/A";
     }
 
-    setLoadingElements(loadingEl, ["#member-changes-count", "#memberChangesCarousel", "#membersGrid", "#membersTable"]);
+    setLoadingElements(loadingEl, ["#member-changes-count", "#memberChangesCarousel", "#membersGrid", "#membersTable", "#points-gained-day"]);
     const history = await fetchClanHistory(clanLower);
+    document.getElementById("points-gained-day").textContent = `${formatNumber(
+      getClanPointsGainedLastDay(history, currentBattle?.Points || 0)
+    )} points`;
 
     const changes = await fetchClanChanges(clanLower);
     document.getElementById("member-changes-count").textContent = formatNumber(countRecentChanges(changes));
@@ -1156,6 +1160,52 @@ function getGainedSince(userId, currentPoints, timelineMap, windowMs) {
   }
 
   return Math.max(currentPoints - recent.Points, 0);
+}
+
+function getClanPointsGainedLastDay(history, currentPoints) {
+  return getClanPointsGainedSince(history, currentPoints, 24 * 60 * 60 * 1000);
+}
+
+function getClanPointsGainedSince(history, currentPoints, windowMs) {
+  const snapshots = (history || [])
+    .map((entry) => {
+      const timestampMs = new Date(entry?.timestamp).getTime();
+      if (!Number.isFinite(timestampMs)) {
+        return null;
+      }
+
+      const contributions = Array.isArray(entry?.data?.PointContributions)
+        ? entry.data.PointContributions
+        : Array.isArray(entry?.PointContributions)
+        ? entry.PointContributions
+        : [];
+
+      const points = contributions.reduce((total, contribution) => {
+        const value = Number(contribution?.Points);
+        return total + (Number.isFinite(value) ? value : 0);
+      }, 0);
+
+      return { timestampMs, points };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+
+  if (snapshots.length === 0) {
+    return 0;
+  }
+
+  const cutoff = Date.now() - windowMs;
+  const recent = snapshots.find((snapshot) => snapshot.timestampMs >= cutoff);
+  if (!recent) {
+    return 0;
+  }
+
+  const numericCurrent = Number(currentPoints);
+  if (!Number.isFinite(numericCurrent)) {
+    return 0;
+  }
+
+  return Math.max(numericCurrent - recent.points, 0);
 }
 
 async function openPopupForMember(userId, username, clanData, clanLower, members, currentPoints) {
