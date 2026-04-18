@@ -3,7 +3,7 @@ export const FALLBACK_PINNED_CLANS = [
 ];
 
 export const FALLBACK_MESSAGE = {
-  message: "petsimulatorclans.com",
+  message: "petsimulatorclans",
   color: "#3c3c3c",
   visible: false,
 };

@@ -137,13 +137,13 @@ async function loadAnnouncement() {
   const effectiveMessage = message && typeof message === "object" ? message : FALLBACK_MESSAGE;
 
   if (effectiveMessage.visible) {
-    topBarEl.textContent = effectiveMessage.message || "petsimulatorclans.com";
+    topBarEl.textContent = effectiveMessage.message || "petsimulatorclans";
     topBarEl.style.backgroundColor = effectiveMessage.color || "#3c3c3c";
     topBarEl.classList.remove("hidden");
     return;
   }
 
-  topBarEl.textContent = "petsimulatorclans.com";
+  topBarEl.textContent = "petsimulatorclans";
   topBarEl.style.backgroundColor = "#3c3c3c";
   topBarEl.classList.add("hidden");
 }
@@ -187,7 +187,7 @@ async function renderHome(nonce) {
           <div class="subtext">
             <p>
               Want your clan pinned?
-              <a href="https://discord.petsimulatorclans.com/" target="_blank" rel="noopener noreferrer">Join the Discord</a>
+              <a href="https://discord.gg/wPhaR58pDp" target="_blank" rel="noopener noreferrer">Join the Discord</a>
               and message andreyondemand.
             </p>
           </div>
