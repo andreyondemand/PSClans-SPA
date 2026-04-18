@@ -49,6 +49,7 @@ const state = {
   responseCache: new Map(),
   inFlightRequests: new Map(),
   nextWorkerRequestAt: 0,
+  memberListSort: null,
 };
 
 closePopupBtn.addEventListener("click", closePopup);
@@ -385,6 +386,8 @@ async function renderClan(params, nonce) {
     return;
   }
 
+  state.memberListSort = null;
+
   appEl.innerHTML = `
     <div id="loading-indicator">Loading...</div>
     <header>
@@ -414,10 +417,10 @@ async function renderClan(params, nonce) {
 
     <div class="content">
       <div class="select-container">
-        <label for="memberSortDropdown">Sort:</label>
+        <label id="memberSortLabel" for="memberSortDropdown">Sort:</label>
         <select id="memberSortDropdown">
-          <option value="low_high">Highest to Lowest</option>
-          <option value="online_offline">Online to Offline</option>
+          <option value="high_low">Highest to Lowest</option>
+          <option value="low_high">Lowest to Highest</option>
         </select>
 
         <label for="memberViewDropdown">View:</label>
@@ -432,7 +435,6 @@ async function renderClan(params, nonce) {
 
       <div id="membersGrid" class="grid-container"></div>
       <div id="membersTable"></div>
-      <p style="color: gray">*player online status may be inaccurate; check with the user for an accurate reading</p>
 
       <div class="carousel-container">
         <div class="carousel top-clans">
@@ -537,10 +539,20 @@ async function renderClan(params, nonce) {
     }
 
     const memberSortDropdown = document.getElementById("memberSortDropdown");
+    const memberSortLabel = document.getElementById("memberSortLabel");
     const memberViewDropdown = document.getElementById("memberViewDropdown");
     const memberSearchInput = document.getElementById("memberSearchInput");
 
+    const updateSortVisibility = () => {
+      const shouldHide = memberViewDropdown.value === "list";
+      memberSortDropdown.style.display = shouldHide ? "none" : "";
+      if (memberSortLabel) {
+        memberSortLabel.style.display = shouldHide ? "none" : "";
+      }
+    };
+
     const rerender = () => {
+      updateSortVisibility();
       const searchTerm = memberSearchInput.value.trim().toLowerCase();
       const filteredRows = rows.filter((member) => {
         const username = usernameMap[member.UserID] || String(member.UserID);
@@ -548,14 +560,17 @@ async function renderClan(params, nonce) {
       });
       const sorted = sortMembers([...filteredRows], memberSortDropdown.value);
       if (memberViewDropdown.value === "list") {
-        renderMembersList(sorted, usernameMap, timelineMap, clanData, clanLower, members);
+        renderMembersList(sorted, usernameMap, timelineMap, clanData, clanLower, members, rerender);
       } else {
         renderMembersGrid(sorted, usernameMap, timelineMap, clanData, clanLower, members);
       }
     };
 
     memberSortDropdown.addEventListener("change", rerender);
-    memberViewDropdown.addEventListener("change", rerender);
+    memberViewDropdown.addEventListener("change", () => {
+      updateSortVisibility();
+      rerender();
+    });
     memberSearchInput.addEventListener("input", rerender);
     rerender();
 
@@ -920,9 +935,12 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
 
   grid.innerHTML = "";
   tableWrap.innerHTML = "";
+  const placeByUserId = buildPlaceByPointsMap(rows);
 
-  rows.forEach((member, idx) => {
+  rows.forEach((member) => {
     const username = usernameMap[member.UserID] || String(member.UserID);
+    const place = placeByUserId.get(member.UserID) || 0;
+    const gainedLastHour = getGainedLastHour(member.UserID, member.Points, timelineMap);
     const gained = getGainedLastDay(member.UserID, member.Points, timelineMap);
     const avatar = state.userAvatarCache.get(member.UserID) || PLAYER_ICON_FALLBACK;
 
@@ -935,17 +953,18 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
 
     card.innerHTML = `
       <img src="${avatar}" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
-      <h4 class="player-place">#${idx + 1}</h4>
+      <h4 class="player-place">#${place}</h4>
       <p class="player-name">${escapeHtml(username)}</p>
       <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(member.Points)} Points</p>
-      <p class="LastDay">Gained ${formatNumber(gained)} points in the last day</p>
+      <p class="LastHour">Last hour: ${formatNumber(gainedLastHour)} points</p>
+      <p class="LastDay">Last day: ${formatNumber(gained)} points</p>
     `;
 
     grid.appendChild(card);
   });
 }
 
-function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, members) {
+function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, members, onSortChange) {
   const grid = document.getElementById("membersGrid");
   const tableWrap = document.getElementById("membersTable");
   if (!grid || !tableWrap) {
@@ -953,35 +972,67 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
   }
 
   grid.innerHTML = "";
+  const placeByUserId = buildPlaceByPointsMap(rows);
+
+  const preparedRows = rows.map((member, idx) => {
+    const username = usernameMap[member.UserID] || String(member.UserID);
+    return {
+      ...member,
+      place: placeByUserId.get(member.UserID) || 0,
+      username,
+      gainedLastHour: getGainedLastHour(member.UserID, member.Points, timelineMap),
+      gainedLastDay: getGainedLastDay(member.UserID, member.Points, timelineMap),
+    };
+  });
+  const sortedRows = sortMemberListRows(preparedRows);
 
   const table = document.createElement("table");
   table.className = "responsive-table";
   table.innerHTML = `
     <thead>
-      <tr><th>Place</th><th>Player</th><th>Points</th><th>Presence</th><th>Gained in the last day</th></tr>
+      <tr>
+        <th class="member-sort-header" data-sort-key="place">Place</th>
+        <th class="member-sort-header" data-sort-key="player">Player</th>
+        <th class="member-sort-header" data-sort-key="points">Points</th>
+        <th class="member-sort-header" data-sort-key="lastHour">Last hour</th>
+        <th class="member-sort-header" data-sort-key="lastDay">Last day</th>
+      </tr>
     </thead>
     <tbody></tbody>
   `;
 
   const tbody = table.querySelector("tbody");
+  const headerCells = table.querySelectorAll(".member-sort-header");
+  headerCells.forEach((header) => {
+    const sortKey = header.getAttribute("data-sort-key");
+    if (!sortKey) {
+      return;
+    }
 
-  rows.forEach((member, idx) => {
-    const username = usernameMap[member.UserID] || String(member.UserID);
-    const gained = getGainedLastDay(member.UserID, member.Points, timelineMap);
+    header.addEventListener("click", () => {
+      toggleMemberListSort(sortKey);
+      if (onSortChange) {
+        onSortChange();
+      }
+    });
+  });
 
+  sortedRows.forEach((member, idx) => {
     const row = document.createElement("tr");
     row.className = "listrow";
     if (member.Points > 0) {
       row.style.cursor = "pointer";
-      row.addEventListener("click", () => openPopupForMember(member.UserID, username, clanData, clanLower, members, member.Points));
+      row.addEventListener("click", () =>
+        openPopupForMember(member.UserID, member.username, clanData, clanLower, members, member.Points)
+      );
     }
 
     row.innerHTML = `
-      <td data-label="Place">#${idx + 1}</td>
-      <td class="player-name" data-label="Player">${escapeHtml(username)}</td>
+      <td data-label="Place">#${member.place}</td>
+      <td class="player-name" data-label="Player">${escapeHtml(member.username)}</td>
       <td class="points" data-label="Points">${formatNumber(member.Points)}</td>
-      <td data-label="Presence">N/A</td>
-      <td data-label="Gained in the last day">Gained ${formatNumber(gained)} points in the last day</td>
+      <td data-label="Last hour">Last hour: ${formatNumber(member.gainedLastHour)} points</td>
+      <td data-label="Last day">Last day: ${formatNumber(member.gainedLastDay)} points</td>
     `;
 
     tbody.appendChild(row);
@@ -992,10 +1043,63 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
 }
 
 function sortMembers(rows, sortMode) {
-  if (sortMode === "online_offline") {
+  if (sortMode === "low_high") {
+    return rows.sort((a, b) => a.Points - b.Points);
+  }
+  if (sortMode === "high_low") {
     return rows.sort((a, b) => b.Points - a.Points);
   }
   return rows.sort((a, b) => b.Points - a.Points);
+}
+
+function toggleMemberListSort(sortKey) {
+  if (state.memberListSort?.key === sortKey) {
+    state.memberListSort = {
+      key: sortKey,
+      direction: state.memberListSort.direction === "asc" ? "desc" : "asc",
+    };
+    return;
+  }
+
+  state.memberListSort = {
+    key: sortKey,
+    direction: sortKey === "player" || sortKey === "place" ? "asc" : "desc",
+  };
+}
+
+function sortMemberListRows(rows) {
+  if (!state.memberListSort) {
+    return rows;
+  }
+
+  const direction = state.memberListSort.direction === "asc" ? 1 : -1;
+  return rows.sort((a, b) => {
+    if (state.memberListSort.key === "player") {
+      return a.username.localeCompare(b.username) * direction;
+    }
+    if (state.memberListSort.key === "place") {
+      return (a.place - b.place) * direction;
+    }
+    if (state.memberListSort.key === "points") {
+      return (a.Points - b.Points) * direction;
+    }
+    if (state.memberListSort.key === "lastHour") {
+      return (a.gainedLastHour - b.gainedLastHour) * direction;
+    }
+    if (state.memberListSort.key === "lastDay") {
+      return (a.gainedLastDay - b.gainedLastDay) * direction;
+    }
+    return 0;
+  });
+}
+
+function buildPlaceByPointsMap(rows) {
+  const ranked = [...rows].sort((a, b) => b.Points - a.Points);
+  const map = new Map();
+  ranked.forEach((member, idx) => {
+    map.set(member.UserID, idx + 1);
+  });
+  return map;
 }
 
 function buildTimelineMap(history, activeBattle) {
@@ -1032,13 +1136,21 @@ function buildTimelineMap(history, activeBattle) {
 }
 
 function getGainedLastDay(userId, currentPoints, timelineMap) {
+  return getGainedSince(userId, currentPoints, timelineMap, 24 * 60 * 60 * 1000);
+}
+
+function getGainedLastHour(userId, currentPoints, timelineMap) {
+  return getGainedSince(userId, currentPoints, timelineMap, 60 * 60 * 1000);
+}
+
+function getGainedSince(userId, currentPoints, timelineMap, windowMs) {
   const timeline = timelineMap.get(userId) || [];
   if (timeline.length === 0) {
     return 0;
   }
 
-  const last24 = Date.now() - 24 * 60 * 60 * 1000;
-  const recent = timeline.find((entry) => new Date(entry.timestamp).getTime() >= last24);
+  const cutoff = Date.now() - windowMs;
+  const recent = timeline.find((entry) => new Date(entry.timestamp).getTime() >= cutoff);
   if (!recent) {
     return 0;
   }

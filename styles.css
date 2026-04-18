@@ -316,6 +316,11 @@ th {
   color: var(--primary-color);
 }
 
+.member-sort-header {
+  cursor: pointer;
+  user-select: none;
+}
+
 td {
   color: var(--text-color);
 }
