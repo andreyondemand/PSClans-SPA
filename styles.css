@@ -35,12 +35,17 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: nowrap;
   padding: calc(10px + env(safe-area-inset-top)) 20px 10px;
   color: white;
   gap: 16px;
   position: sticky;
   top: 0;
   z-index: 200;
+}
+
+.brand-link {
+  flex: 0 0 auto;
 }
 
 .brand-link img {
@@ -51,8 +56,19 @@ body {
 .topbar nav {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
   gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.topbar nav::-webkit-scrollbar {
+  display: none;
 }
 
 .topbar nav a {
@@ -63,7 +79,9 @@ body {
   border-radius: 999px;
   font-weight: 500;
   font-size: 18px;
-  display: inline-flex;
+  display: flex;
+  flex: 0 0 auto;
+  white-space: nowrap;
   align-items: center;
   justify-content: center;
 }
@@ -596,8 +614,6 @@ select {
   }
 
   .topbar {
-    flex-direction: column;
-    align-items: flex-start;
     padding: 10px 12px;
   }
 
@@ -612,20 +628,8 @@ select {
 }
 
 @media (max-width: 700px) {
-  .topbar {
-    align-items: stretch;
-  }
-
-  .topbar nav {
-    width: 100%;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    padding-bottom: 4px;
-  }
-
   .topbar nav a {
-    flex: 0 0 auto;
-    white-space: nowrap;
+    padding: 6px 8px;
   }
 
   .search-container {
