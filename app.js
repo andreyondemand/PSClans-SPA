@@ -328,6 +328,9 @@ async function renderClans(nonce) {
 
     tbody.innerHTML = "";
 
+    const trackedRows = new Map();
+    const trackedOnPage = [];
+
     clans.sort((a, b) => b.Points - a.Points).forEach((clan, index) => {
       const row = document.createElement("tr");
       row.style.cursor = "pointer";
@@ -335,6 +338,8 @@ async function renderClans(nonce) {
 
       const iconUrl = state.assetIconCache.get(stripAssetId(clan.Icon)) || `${ASSET_BASE}/error.png`;
       const medal = getMedalIcon(index);
+      const clanLower = clan.Name.toLowerCase();
+      const isTracked = trackedSet.has(clanLower);
 
       row.innerHTML = `
         <td data-label="Place">#${index + 1}${medal ? ` <img class="icon" src="${medal}" alt="medal" />` : ""}</td>
@@ -344,24 +349,35 @@ async function renderClans(nonce) {
             <span style="font-size:24px;line-height:50px;">${escapeHtml(clan.Name)}</span>
           </div>
         </td>
-        <td class="changes-cell" data-label="24HR Member Changes">${trackedSet.has(clan.Name.toLowerCase()) ? "Loading..." : "N/A"}</td>
+        <td class="changes-cell" data-label="24HR Member Changes">${isTracked ? "Loading..." : "N/A"}</td>
         <td data-label="Points">${formatNumber(clan.Points)}</td>
         <td data-label="Members">${formatNumber((clan.Members || 0) + 1)}</td>
       `;
 
       tbody.appendChild(row);
 
-      if (trackedSet.has(clan.Name.toLowerCase())) {
-        fetchMemberChangesCount(clan.Name.toLowerCase()).then((count) => {
-          if (nonce === state.routeNonce) {
-            const cell = row.querySelector(".changes-cell");
-            if (cell) {
-              cell.textContent = Number.isFinite(count) ? formatNumber(count) : "N/A";
-            }
-          }
-        });
+      if (isTracked) {
+        trackedRows.set(clanLower, row);
+        trackedOnPage.push(clanLower);
       }
     });
+
+    if (trackedOnPage.length > 0) {
+      const countsByClan = await fetchMemberChangesCountsBatch(trackedOnPage);
+      if (nonce !== state.routeNonce) {
+        return;
+      }
+
+      trackedOnPage.forEach((clanLower) => {
+        const row = trackedRows.get(clanLower);
+        const cell = row?.querySelector(".changes-cell");
+        if (!cell) {
+          return;
+        }
+        const count = countsByClan[clanLower];
+        cell.textContent = Number.isFinite(count) ? formatNumber(count) : "N/A";
+      });
+    }
   } catch (error) {
     tbody.innerHTML = `<tr><td colspan="5"><div class="error-block">Failed to load clans.</div></td></tr>`;
   }
@@ -1467,9 +1483,35 @@ async function fetchPinnedClans() {
   return FALLBACK_PINNED_CLANS;
 }
 
-async function fetchMemberChangesCount(clanLower) {
-  const changes = await fetchClanChanges(clanLower);
-  return countRecentChanges(changes);
+async function fetchMemberChangesCountsBatch(clanLowers) {
+  const unique = [...new Set((clanLowers || []).map((name) => String(name || "").toLowerCase()).filter(Boolean))].sort();
+  if (unique.length === 0) {
+    return {};
+  }
+
+  try {
+    const clansParam = encodeURIComponent(unique.join(","));
+    const payload = await fetchJSONCached(`${WORKER_API}/changes?clans=${clansParam}&counts=1`, {
+      cacheKey: `clan_changes_counts_${unique.join(",")}`,
+      ttlMs: CACHE_TTL_MS.clanChanges,
+    });
+
+    const countsByClan = {};
+    unique.forEach((clanLower) => {
+      const value = payload?.[clanLower];
+      countsByClan[clanLower] = Number.isFinite(value) ? value : 0;
+    });
+    return countsByClan;
+  } catch {
+    const fallbackCounts = {};
+    await Promise.all(
+      unique.map(async (clanLower) => {
+        const changes = await fetchClanChanges(clanLower);
+        fallbackCounts[clanLower] = countRecentChanges(changes);
+      })
+    );
+    return fallbackCounts;
+  }
 }
 
 function countRecentChanges(changes) {
