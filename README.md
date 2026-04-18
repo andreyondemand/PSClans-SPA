@@ -55,3 +55,18 @@ Client-side behavior to reduce API volume:
 - Worker calls are rate-limited on the client.
 - Responses are cached in memory and `localStorage` with per-endpoint TTLs.
 - In-flight requests are deduplicated so concurrent views reuse the same request.
+
+## License
+
+Code in this repository is licensed under **GNU AGPL-3.0-or-later**.
+See [`LICENSE`](./LICENSE).
+
+## Third-party Assets and APIs
+
+- Files under `assets/images` are third-party assets and are not authored by this project.
+  They are not covered by the AGPL code license unless a specific asset says otherwise.
+- The Pet Simulator 99 public API is provided by **BIG Games LLC**.
+  Reference: <https://github.com/BIG-Games-LLC/ps99-public-api-docs>
+  This project is not affiliated with BIG Games LLC; API use must follow their terms and policies.
+
+See [`THIRD_PARTY.md`](./THIRD_PARTY.md) for attribution and scope details.
