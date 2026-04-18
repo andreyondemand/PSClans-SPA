@@ -49,27 +49,33 @@
       <button id="close-popup" class="close-btn" aria-label="Close">&times;</button>
       <div class="popup-content">
         <h3>User Information</h3>
-        <p><strong>Username:</strong> <span id="popup-username"></span></p>
-        <p><strong>User ID:</strong> <span id="popup-userid"></span></p>
-        <p><strong>Joined:</strong> <span id="popup-joined"></span></p>
-        <p>
-          <strong
-            ><img
-              class="icon"
-              src="./assets/images/gold_star_1_outline.png"
-              alt="points"
-            />
-            Points:</strong
-          >
-          <span id="popup-points"></span>
-        </p>
-        <label for="timeframeDropdown">Select Time Interval:</label>
-        <select id="timeframeDropdown">
-          <option value="minute">Minutes</option>
-          <option value="hour">Hourly</option>
-          <option value="day">Daily</option>
-        </select>
-        <canvas id="pointsGraph" width="800" height="400"></canvas>
+        <div class="popup-meta">
+          <p><strong>Username:</strong> <span id="popup-username"></span></p>
+          <p><strong>User ID:</strong> <span id="popup-userid"></span></p>
+          <p><strong>Joined:</strong> <span id="popup-joined"></span></p>
+          <p>
+            <strong
+              ><img
+                class="icon"
+                src="./assets/images/gold_star_1_outline.png"
+                alt="points"
+              />
+              Points:</strong
+            >
+            <span id="popup-points"></span>
+          </p>
+        </div>
+        <div class="popup-controls">
+          <label for="timeframeDropdown">Time Interval:</label>
+          <select id="timeframeDropdown">
+            <option value="minute">Minutes</option>
+            <option value="hour">Hourly</option>
+            <option value="day">Daily</option>
+          </select>
+        </div>
+        <div class="popup-chart-wrap">
+          <canvas id="pointsGraph" width="800" height="400"></canvas>
+        </div>
       </div>
     </div>
 

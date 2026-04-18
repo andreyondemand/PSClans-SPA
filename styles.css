@@ -23,6 +23,7 @@ body {
   padding: 0;
   background-color: var(--bg-color);
   color: var(--text-color);
+  min-height: 100vh;
 }
 
 .hidden {
@@ -34,9 +35,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: calc(10px + env(safe-area-inset-top)) 20px 10px;
   color: white;
   gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 200;
 }
 
 .brand-link img {
@@ -55,9 +59,13 @@ body {
   color: white;
   text-decoration: none;
   padding: 6px 12px;
+  min-height: 44px;
   border-radius: 999px;
   font-weight: 500;
   font-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .topbar nav a:hover,
@@ -184,6 +192,8 @@ p {
 .search-input {
   width: min(680px, 100%);
   padding: 10px;
+  min-height: 44px;
+  font-size: 16px;
   border-radius: 4px;
   border: 1px solid #444;
   background-color: var(--card-bg-color);
@@ -195,6 +205,7 @@ p {
 .button,
 .pagination-button {
   padding: 10px 20px;
+  min-height: 44px;
   border-radius: 4px;
   border: none;
   background-color: var(--primary-color);
@@ -315,6 +326,7 @@ tr:hover {
 
 .table-scroll {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .grid-container {
@@ -384,11 +396,12 @@ tr:hover {
 select {
   min-width: 160px;
   padding: 10px;
+  min-height: 44px;
   border-radius: var(--border-radius);
   border: 1px solid var(--primary-color);
   background-color: var(--card-bg-color);
   color: var(--text-color);
-  font-size: 1em;
+  font-size: 16px;
 }
 
 .member-change-entry {
@@ -478,11 +491,49 @@ select {
   box-shadow: var(--box-shadow);
   width: min(1000px, 95vw);
   max-height: 92vh;
-  overflow: auto;
+  max-height: 92dvh;
+  overflow: hidden;
 }
 
 .popup-content {
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  height: 100%;
+  padding-top: 30px;
+}
+
+.popup-content h3 {
+  margin: 0;
+}
+
+.popup-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, auto));
+  justify-content: center;
+  gap: 8px 16px;
+  text-align: center;
+}
+
+.popup-meta p {
+  margin: 0;
+  line-height: 1.3;
+}
+
+.popup-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.popup-chart-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: clamp(140px, 34vh, 280px);
 }
 
 .close-btn {
@@ -497,9 +548,9 @@ select {
   cursor: pointer;
 }
 
-.popup canvas {
+.popup-chart-wrap canvas {
   width: 100% !important;
-  height: auto !important;
+  height: 100% !important;
 }
 
 .status-info {
@@ -518,7 +569,7 @@ select {
   background-color: #001b42;
   color: white;
   text-align: center;
-  padding: 12px;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
   width: 100%;
 }
 
@@ -546,7 +597,7 @@ select {
   }
 
   .topbar nav a {
-    font-size: 15px;
+    font-size: 16px;
     padding: 6px 10px;
   }
 
@@ -556,6 +607,46 @@ select {
 }
 
 @media (max-width: 700px) {
+  .topbar {
+    align-items: stretch;
+  }
+
+  .topbar nav {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .topbar nav a {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .search-container {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-container > * {
+    width: 100%;
+  }
+
+  .select-container {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .select-container label {
+    margin-top: 2px;
+  }
+
+  .select-container select,
+  .select-container .search-input {
+    width: 100%;
+    min-width: 0;
+  }
+
   .guild-header img,
   #guild-icon {
     width: 92px;
@@ -570,5 +661,146 @@ select {
 
   .member-info {
     min-width: 140px;
+  }
+
+  .responsive-table thead {
+    display: none;
+  }
+
+  .responsive-table,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .responsive-table tr {
+    background-color: var(--card-bg-color);
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    padding: 8px;
+  }
+
+  .responsive-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid #333;
+    padding: 10px 6px;
+  }
+
+  .responsive-table td::before {
+    content: attr(data-label);
+    color: var(--secondary-color);
+    font-weight: 600;
+  }
+
+  .responsive-table td:last-child {
+    border-bottom: none;
+  }
+
+  .responsive-table td[data-label="Clan"] span {
+    font-size: 16px !important;
+    line-height: 1.3 !important;
+  }
+
+  .popup {
+    width: 100vw;
+    max-height: 100vh;
+    height: 100vh;
+    border-radius: 0;
+    left: 0;
+    top: 0;
+    transform: none;
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .popup-content {
+    gap: 6px;
+    padding-top: 28px;
+  }
+
+  .popup-content h3 {
+    font-size: 18px;
+  }
+
+  .popup-meta {
+    gap: 4px 10px;
+  }
+
+  .popup-meta p {
+    font-size: 13px;
+  }
+
+  .popup-controls {
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .popup-controls label {
+    font-size: 14px;
+  }
+
+  .popup-controls select {
+    min-height: 38px;
+    min-width: 126px;
+    font-size: 14px;
+  }
+
+  .popup-chart-wrap {
+    min-height: 0;
+  }
+}
+
+@media (max-height: 560px) and (max-width: 980px) {
+  .popup {
+    width: 100vw;
+    max-height: 100dvh;
+    height: 100dvh;
+    border-radius: 0;
+    left: 0;
+    top: 0;
+    transform: none;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .popup-content {
+    gap: 4px;
+    padding-top: 22px;
+  }
+
+  .popup-content h3 {
+    font-size: 16px;
+  }
+
+  .popup-meta {
+    gap: 3px 8px;
+  }
+
+  .popup-meta p {
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .popup-controls {
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .popup-controls label {
+    font-size: 12px;
+  }
+
+  .popup-controls select {
+    min-height: 34px;
+    min-width: 110px;
+    font-size: 13px;
+  }
+
+  .popup-chart-wrap {
+    min-height: 0;
   }
 }

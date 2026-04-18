@@ -160,6 +160,20 @@ function renderNotFound() {
   `;
 }
 
+function setLoadingElements(loadingEl, elementIds) {
+  if (!loadingEl) {
+    return;
+  }
+  loadingEl.textContent = `Loading ${elementIds.join(", ")}`;
+}
+
+function setLoadingItem(loadingEl, label) {
+  if (!loadingEl) {
+    return;
+  }
+  loadingEl.textContent = `Loading ${label}`;
+}
+
 async function renderHome(nonce) {
   appEl.innerHTML = `
     <header class="guild-header">
@@ -278,7 +292,7 @@ async function renderClans(nonce) {
     <div class="content">
       <h2>Clans</h2>
       <div class="table-scroll">
-        <table>
+        <table class="responsive-table">
           <thead>
             <tr>
               <th>Place</th>
@@ -320,16 +334,16 @@ async function renderClans(nonce) {
       const medal = getMedalIcon(index);
 
       row.innerHTML = `
-        <td>#${index + 1}${medal ? ` <img class="icon" src="${medal}" alt="medal" />` : ""}</td>
-        <td>
+        <td data-label="Place">#${index + 1}${medal ? ` <img class="icon" src="${medal}" alt="medal" />` : ""}</td>
+        <td data-label="Clan">
           <div style="display:flex;align-items:center;gap:10px;">
             <img src="${iconUrl}" width="50" height="50" alt="${escapeHtml(clan.Name)}" />
             <span style="font-size:24px;line-height:50px;">${escapeHtml(clan.Name)}</span>
           </div>
         </td>
-        <td class="changes-cell">${trackedSet.has(clan.Name.toLowerCase()) ? "Loading..." : "N/A"}</td>
-        <td>${formatNumber(clan.Points)}</td>
-        <td>${formatNumber((clan.Members || 0) + 1)}</td>
+        <td class="changes-cell" data-label="24HR Member Changes">${trackedSet.has(clan.Name.toLowerCase()) ? "Loading..." : "N/A"}</td>
+        <td data-label="Points">${formatNumber(clan.Points)}</td>
+        <td data-label="Members">${formatNumber((clan.Members || 0) + 1)}</td>
       `;
 
       tbody.appendChild(row);
@@ -410,6 +424,9 @@ async function renderClan(params, nonce) {
           <option value="grid">Grid Layout</option>
           <option value="list">List layout</option>
         </select>
+
+        <label for="memberSearchInput">Member Search:</label>
+        <input type="text" id="memberSearchInput" class="search-input" placeholder="Search members..." />
       </div>
 
       <div id="membersGrid" class="grid-container"></div>
@@ -426,7 +443,7 @@ async function renderClan(params, nonce) {
       <div class="previousContent">
         <h2>Previous Battles</h2>
         <div class="table-scroll">
-          <table>
+          <table class="responsive-table">
             <thead>
               <tr><th>Battle</th><th>Players</th><th>Medal</th><th>Place</th></tr>
             </thead>
@@ -441,7 +458,9 @@ async function renderClan(params, nonce) {
   const clanLower = clanName.toLowerCase();
 
   try {
+    setLoadingElements(loadingEl, ["#battle-place", "#battle-points", "#guild-level"]);
     const activeBattle = state.activeBattle || (await fetchActiveBattleName());
+    setLoadingElements(loadingEl, ["#guild-name", "#guild-desc", "#guild-icon"]);
     const clanData = await fetchClanData(clanName);
 
     if (nonce !== state.routeNonce) {
@@ -453,7 +472,10 @@ async function renderClan(params, nonce) {
     }
 
     const iconId = stripAssetId(clanData.Icon);
-    await resolveAssetIconsBatch([iconId]);
+    setLoadingElements(loadingEl, ["#guild-icon"]);
+    await resolveAssetIconsBatch([iconId], {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+    });
     const iconUrl = state.assetIconCache.get(iconId) || `${ASSET_BASE}/error.png`;
 
     document.getElementById("guild-icon").src = iconUrl;
@@ -471,13 +493,16 @@ async function renderClan(params, nonce) {
       document.getElementById("kick-time").textContent = "N/A";
     }
 
+    setLoadingElements(loadingEl, ["#member-changes-count", "#memberChangesCarousel", "#membersGrid", "#membersTable"]);
     const history = await fetchClanHistory(clanLower);
 
     const changes = await fetchClanChanges(clanLower);
     document.getElementById("member-changes-count").textContent = formatNumber(countRecentChanges(changes));
 
+    setLoadingElements(loadingEl, ["#points-needed", "#points-needed2"]);
     await populatePointsNeeded(clanLower);
-    await populateMemberChangesCarousel(changes, clanLower, nonce);
+    setLoadingElements(loadingEl, ["#memberChangesCarousel"]);
+    await populateMemberChangesCarousel(changes, clanLower, nonce, (label) => setLoadingItem(loadingEl, label));
     populatePreviousBattles(clanData, activeBattle);
 
     const contributions = [...(currentBattle?.PointContributions || [])];
@@ -495,8 +520,14 @@ async function renderClan(params, nonce) {
     rows.sort((a, b) => b.Points - a.Points);
 
     const userIds = rows.map((row) => row.UserID);
-    const usernameMap = await resolveClanUsernames(clanLower, userIds);
-    await resolveUserAvatarsBatch(userIds);
+    setLoadingElements(loadingEl, ["#membersGrid", "#membersTable"]);
+    const usernameMap = await resolveClanUsernames(clanLower, userIds, {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+    });
+    await resolveUserAvatarsBatch(userIds, {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+      labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
+    });
 
     const timelineMap = buildTimelineMap(history, activeBattle);
 
@@ -506,9 +537,15 @@ async function renderClan(params, nonce) {
 
     const memberSortDropdown = document.getElementById("memberSortDropdown");
     const memberViewDropdown = document.getElementById("memberViewDropdown");
+    const memberSearchInput = document.getElementById("memberSearchInput");
 
     const rerender = () => {
-      const sorted = sortMembers([...rows], memberSortDropdown.value);
+      const searchTerm = memberSearchInput.value.trim().toLowerCase();
+      const filteredRows = rows.filter((member) => {
+        const username = usernameMap[member.UserID] || String(member.UserID);
+        return username.toLowerCase().includes(searchTerm) || String(member.UserID).includes(searchTerm);
+      });
+      const sorted = sortMembers([...filteredRows], memberSortDropdown.value);
       if (memberViewDropdown.value === "list") {
         renderMembersList(sorted, usernameMap, timelineMap, clanData, clanLower, members);
       } else {
@@ -518,6 +555,7 @@ async function renderClan(params, nonce) {
 
     memberSortDropdown.addEventListener("change", rerender);
     memberViewDropdown.addEventListener("change", rerender);
+    memberSearchInput.addEventListener("input", rerender);
     rerender();
 
     loadingEl.classList.add("hidden");
@@ -558,7 +596,10 @@ async function renderPlayers(params, nonce) {
     </div>
   `;
 
+  const loadingEl = document.getElementById("loading-indicator");
+
   try {
+    setLoadingElements(loadingEl, ["#guild-name", "#guild-desc", "#battlename", "#battle-points", "#guild-icon"]);
     const clanData = await fetchClanData(clan);
     if (nonce !== state.routeNonce) {
       return;
@@ -570,7 +611,10 @@ async function renderPlayers(params, nonce) {
     }
 
     const iconId = stripAssetId(clanData.Icon);
-    await resolveAssetIconsBatch([iconId]);
+    setLoadingElements(loadingEl, ["#guild-icon"]);
+    await resolveAssetIconsBatch([iconId], {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+    });
 
     document.getElementById("guild-name").textContent = `[${clanData.Name}]`;
     document.getElementById("guild-desc").textContent = clanData.Desc || "";
@@ -580,8 +624,14 @@ async function renderPlayers(params, nonce) {
 
     const contributions = [...(battle.PointContributions || [])].sort((a, b) => b.Points - a.Points);
     const userIds = contributions.map((entry) => entry.UserID);
-    const usernameMap = await resolveClanUsernames(clan.toLowerCase(), userIds);
-    await resolveUserAvatarsBatch(userIds);
+    setLoadingElements(loadingEl, ["#membersGrid"]);
+    const usernameMap = await resolveClanUsernames(clan.toLowerCase(), userIds, {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+    });
+    await resolveUserAvatarsBatch(userIds, {
+      onProgress: (label) => setLoadingItem(loadingEl, label),
+      labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
+    });
 
     if (nonce !== state.routeNonce) {
       return;
@@ -789,7 +839,7 @@ async function populatePointsNeeded(clanLower) {
   }
 }
 
-async function populateMemberChangesCarousel(changes, clanLower, nonce) {
+async function populateMemberChangesCarousel(changes, clanLower, nonce, onProgress) {
   const carousel = document.getElementById("memberChangesCarousel");
   if (!carousel) {
     return;
@@ -802,8 +852,11 @@ async function populateMemberChangesCarousel(changes, clanLower, nonce) {
 
   const sorted = [...changes].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const ids = sorted.map((entry) => entry.UserID);
-  const usernameMap = await resolveClanUsernames(clanLower, ids);
-  await resolveUserAvatarsBatch(ids);
+  const usernameMap = await resolveClanUsernames(clanLower, ids, { onProgress });
+  await resolveUserAvatarsBatch(ids, {
+    onProgress,
+    labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
+  });
 
   if (nonce !== state.routeNonce) {
     return;
@@ -842,10 +895,10 @@ function populatePreviousBattles(clanData, activeBattle) {
 
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td>${escapeHtml(battle.BattleID)}</td>
-      <td><a href="#">Players</a></td>
-      <td>${escapeHtml(battle.EarnedMedal || "None")}</td>
-      <td>${escapeHtml(String(battle.Place || "N/A"))}</td>
+      <td data-label="Battle">${escapeHtml(battle.BattleID)}</td>
+      <td data-label="Players"><a href="#">Players</a></td>
+      <td data-label="Medal">${escapeHtml(battle.EarnedMedal || "None")}</td>
+      <td data-label="Place">${escapeHtml(String(battle.Place || "N/A"))}</td>
     `;
 
     row.querySelector("a")?.addEventListener("click", (event) => {
@@ -901,6 +954,7 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
   grid.innerHTML = "";
 
   const table = document.createElement("table");
+  table.className = "responsive-table";
   table.innerHTML = `
     <thead>
       <tr><th>Place</th><th>Player</th><th>Points</th><th>Presence</th><th>Gained in the last day</th></tr>
@@ -922,11 +976,11 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
     }
 
     row.innerHTML = `
-      <td>#${idx + 1}</td>
-      <td class="player-name">${escapeHtml(username)}</td>
-      <td class="points">${formatNumber(member.Points)}</td>
-      <td>N/A</td>
-      <td>Gained ${formatNumber(gained)} points in the last day</td>
+      <td data-label="Place">#${idx + 1}</td>
+      <td class="player-name" data-label="Player">${escapeHtml(username)}</td>
+      <td class="points" data-label="Points">${formatNumber(member.Points)}</td>
+      <td data-label="Presence">N/A</td>
+      <td data-label="Gained in the last day">Gained ${formatNumber(gained)} points in the last day</td>
     `;
 
     tbody.appendChild(row);
@@ -1040,6 +1094,8 @@ function renderPopupGraph(timeframe) {
       ],
     },
     options: {
+      responsive: true,
+      maintainAspectRatio: false,
       scales: {
         yAxes: [
           {
@@ -1213,9 +1269,11 @@ async function fetchClanData(clanName) {
   return payload?.data || null;
 }
 
-async function resolveClanUsernames(clanLower, userIds) {
+async function resolveClanUsernames(clanLower, userIds, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const map = {};
   const uniqueIds = [...new Set((userIds || []).map((id) => Number(id)).filter(Number.isFinite))];
+  const requested = new Set(uniqueIds);
 
   try {
     const payload = await fetchJSONCached(`${WORKER_API}/usernames?clan=${encodeURIComponent(clanLower)}`, {
@@ -1230,13 +1288,16 @@ async function resolveClanUsernames(clanLower, userIds) {
           map[userId] = name;
           state.usernameCache.set(userId, name);
           localStorage.setItem(`psc_username_${userId}`, name);
+          if (requested.has(userId) && onProgress) {
+            onProgress(`username @${name} (user ${userId})`);
+          }
         }
       });
     }
   } catch {}
 
   const missingIds = uniqueIds.filter((id) => !map[id]);
-  const fallbackMap = await resolveUsernamesBatch(missingIds);
+  const fallbackMap = await resolveUsernamesBatch(missingIds, { onProgress });
   Object.assign(map, fallbackMap);
 
   uniqueIds.forEach((id) => {
@@ -1248,7 +1309,8 @@ async function resolveClanUsernames(clanLower, userIds) {
   return map;
 }
 
-async function resolveUsernamesBatch(userIds) {
+async function resolveUsernamesBatch(userIds, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   const unique = [...new Set((userIds || []).map((id) => Number(id)).filter(Number.isFinite))];
   const result = {};
 
@@ -1269,6 +1331,9 @@ async function resolveUsernamesBatch(userIds) {
     if (saved) {
       result[id] = saved;
       state.usernameCache.set(id, saved);
+      if (onProgress) {
+        onProgress(`username @${saved} (user ${id})`);
+      }
       continue;
     }
 
@@ -1279,6 +1344,9 @@ async function resolveUsernamesBatch(userIds) {
     const username = payload?.name ? payload.name : String(id);
     result[id] = username;
     state.usernameCache.set(id, username);
+    if (onProgress) {
+      onProgress(`username @${username} (user ${id})`);
+    }
     if (payload?.name) {
       localStorage.setItem(storageKey, payload.name);
     }
@@ -1319,7 +1387,9 @@ function normalizeHistoryPayload(payload, clanLower) {
   return [];
 }
 
-async function resolveAssetIconsBatch(assetIds) {
+async function resolveAssetIconsBatch(assetIds, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const labelById = typeof options.labelById === "function" ? options.labelById : (id) => `asset image ${id}`;
   const unique = [...new Set((assetIds || []).filter(Boolean))];
   const missing = unique.filter((id) => !state.assetIconCache.has(id));
 
@@ -1340,11 +1410,16 @@ async function resolveAssetIconsBatch(assetIds) {
 
     chunk.forEach((id) => {
       state.assetIconCache.set(id, byId.get(String(id)) || `${BIG_IMAGE_API}/${encodeURIComponent(id)}`);
+      if (onProgress) {
+        onProgress(labelById(id));
+      }
     });
   }
 }
 
-async function resolveUserAvatarsBatch(userIds) {
+async function resolveUserAvatarsBatch(userIds, options = {}) {
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
+  const labelById = typeof options.labelById === "function" ? options.labelById : (id) => `user ${id}`;
   const unique = [...new Set((userIds || []).map((id) => Number(id)).filter(Number.isFinite))];
   const missing = unique.filter((id) => !state.userAvatarCache.has(id));
   if (missing.length === 0) {
@@ -1361,6 +1436,9 @@ async function resolveUserAvatarsBatch(userIds) {
     const byId = new Map((payload?.data || []).map((entry) => [entry.targetId, entry.imageUrl || `${ASSET_BASE}/me.png`]));
     chunk.forEach((id) => {
       state.userAvatarCache.set(id, byId.get(id) || `${ASSET_BASE}/me.png`);
+      if (onProgress) {
+        onProgress(`avatar image for ${labelById(id)}`);
+      }
     });
   }
 }
