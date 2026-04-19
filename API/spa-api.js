@@ -406,7 +406,11 @@ async function fetchClanUsernames(clanName, headers) {
   const currentUserIDs = [ownerID, ...members.map((member) => member.UserID)].filter(Number.isFinite);
 
   const resolvedUsers = await resolveUsernames(currentUserIDs);
-  await USERNAMES.put(cacheKey, JSON.stringify(resolvedUsers), { expirationTtl: CACHE_TTL_SECONDS });
+  try {
+    await USERNAMES.put(cacheKey, JSON.stringify(resolvedUsers), { expirationTtl: CACHE_TTL_SECONDS });
+  } catch (error) {
+    console.warn(`Failed USERNAMES.put for ${cacheKey}:`, error);
+  }
   setLocalCache(cacheKey, resolvedUsers);
 
   return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
@@ -470,6 +474,20 @@ async function fetchClanData(clanName) {
   return response.json();
 }
 
+function buildPointsSignature(pointsData) {
+  if (!pointsData || typeof pointsData !== "object") {
+    return "";
+  }
+  const totalPoints = Number(pointsData.Points) || 0;
+  const place = Number(pointsData.Place) || 0;
+  const contributions = Array.isArray(pointsData.PointContributions) ? pointsData.PointContributions : [];
+  const normalized = contributions
+    .map((entry) => `${Number(entry?.UserID) || 0}:${Number(entry?.Points) || 0}`)
+    .sort()
+    .join(",");
+  return `${totalPoints}|${place}|${normalized}`;
+}
+
 async function updatePoints(clanName, pointsData) {
   const timestamp = new Date().toISOString();
   const newEntry = { timestamp, clan: clanName, data: pointsData };
@@ -482,6 +500,11 @@ async function updatePoints(clanName, pointsData) {
   }
   if (!Array.isArray(existingData)) {
     existingData = [];
+  }
+
+  const previousEntry = existingData[existingData.length - 1];
+  if (previousEntry && buildPointsSignature(previousEntry.data) === buildPointsSignature(pointsData)) {
+    return;
   }
 
   const updatedData = [...existingData, newEntry];
@@ -587,7 +610,9 @@ async function fetchAndUpdatePoints() {
   }
 
   const nextCursor = cursor + clansBatch.length >= clansToTrack.length ? 0 : cursor + clansBatch.length;
-  await POINTS.put(cursorKey, String(nextCursor));
+  if (String(nextCursor) !== String(cursorValue || "")) {
+    await POINTS.put(cursorKey, String(nextCursor));
+  }
 
   const clansListKey = `${activeBattle}_clanslist`;
   const existing = await POINTS.get(clansListKey);
@@ -596,8 +621,12 @@ async function fetchAndUpdatePoints() {
     return;
   }
 
-  const merged = [...new Set([...JSON.parse(existing), ...clansToTrack])];
-  await POINTS.put(clansListKey, JSON.stringify(merged, null, 2));
+  const parsedExisting = JSON.parse(existing);
+  const existingList = Array.isArray(parsedExisting) ? parsedExisting : [];
+  const merged = [...new Set([...existingList, ...clansToTrack])];
+  if (merged.length !== existingList.length) {
+    await POINTS.put(clansListKey, JSON.stringify(merged, null, 2));
+  }
 }
 
 async function getTrackedClansSet() {
