@@ -1831,22 +1831,13 @@ async function resolveUsernamesViaUsersApi(userIds, options = {}) {
 
   for (const chunk of chunks) {
     const cacheSuffix = [...chunk].sort((a, b) => a - b).join("_");
-    const payload = await fetchJSONCached(`${ROPROXY_USERS}/users`, {
+    const idsParam = encodeURIComponent(chunk.join(","));
+    const payload = await fetchJSONCached(`${WORKER_API}/usernames?ids=${idsParam}`, {
       cacheKey: `username_batch_${cacheSuffix}`,
       ttlMs: CACHE_TTL_MS.usernameById,
-      fetchOptions: {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          userIds: chunk,
-          excludeBannedUsers: false,
-        }),
-      },
     }).catch(() => null);
 
-    const users = Array.isArray(payload?.data) ? payload.data : [];
+    const users = Array.isArray(payload) ? payload : [];
     users.forEach((user) => {
       const userId = Number(user?.id);
       const username = typeof user?.name === "string" ? user.name : "";
