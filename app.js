@@ -447,6 +447,8 @@ async function renderClan(params, nonce) {
         <select id="memberSortDropdown">
           <option value="high_low">Highest to Lowest</option>
           <option value="low_high">Lowest to Highest</option>
+          <option value="hourly_high_low">Highest Hourly Points</option>
+          <option value="hourly_low_high">Lowest Hourly Points</option>
         </select>
 
         <label for="memberViewDropdown">View:</label>
@@ -594,7 +596,7 @@ async function renderClan(params, nonce) {
         const username = usernameMap[member.UserID] || String(member.UserID);
         return username.toLowerCase().includes(searchTerm) || String(member.UserID).includes(searchTerm);
       });
-      const sorted = sortMembers([...filteredRows], memberSortDropdown.value);
+      const sorted = sortMembers([...filteredRows], memberSortDropdown.value, timelineMap);
       if (memberViewDropdown.value === "list") {
         renderMembersList(sorted, usernameMap, timelineMap, clanData, clanLower, members, rerender);
       } else {
@@ -1103,12 +1105,26 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
   tableWrap.appendChild(table);
 }
 
-function sortMembers(rows, sortMode) {
+function sortMembers(rows, sortMode, timelineMap) {
   if (sortMode === "low_high") {
     return rows.sort((a, b) => a.Points - b.Points);
   }
   if (sortMode === "high_low") {
     return rows.sort((a, b) => b.Points - a.Points);
+  }
+  if (sortMode === "hourly_high_low") {
+    return rows.sort(
+      (a, b) =>
+        getGainedLastHour(b.UserID, b.Points, timelineMap) -
+        getGainedLastHour(a.UserID, a.Points, timelineMap)
+    );
+  }
+  if (sortMode === "hourly_low_high") {
+    return rows.sort(
+      (a, b) =>
+        getGainedLastHour(a.UserID, a.Points, timelineMap) -
+        getGainedLastHour(b.UserID, b.Points, timelineMap)
+    );
   }
   return rows.sort((a, b) => b.Points - a.Points);
 }
