@@ -7,7 +7,7 @@ const ROPROXY_THUMBS = "https://thumbnails.roproxy.com/v1";
 const WORKER_API = "https://psclans-spa.cloudflare-6apm0.workers.dev";
 const ASSET_BASE = "./assets/images";
 const PLAYER_ICON_FALLBACK = `${ASSET_BASE}/error.png`;
-const CACHE_PREFIX = "psc_http_cache_v1_";
+const CACHE_PREFIX = "psc_http_cache_v2_";
 const WORKER_MIN_INTERVAL_MS = 180;
 const CLAN_HISTORY_PAGE_LIMIT = 2000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -2078,6 +2078,10 @@ function readCachedEntry(cacheKey) {
 }
 
 function readStoredCacheEntry(cacheKey) {
+  if (!shouldPersistCache(cacheKey)) {
+    return null;
+  }
+
   const raw = localStorage.getItem(`${CACHE_PREFIX}${cacheKey}`);
   if (!raw) {
     return null;
@@ -2103,9 +2107,16 @@ function writeCachedEntry(cacheKey, value, ttlMs) {
     expiresAt: Date.now() + ttlMs,
   };
   state.responseCache.set(cacheKey, entry);
+  if (!shouldPersistCache(cacheKey)) {
+    return;
+  }
   try {
     localStorage.setItem(`${CACHE_PREFIX}${cacheKey}`, JSON.stringify(entry));
   } catch {}
+}
+
+function shouldPersistCache(cacheKey) {
+  return !String(cacheKey || "").startsWith("clan_history_");
 }
 
 function sleep(ms) {
