@@ -2103,7 +2103,9 @@ function writeCachedEntry(cacheKey, value, ttlMs) {
     expiresAt: Date.now() + ttlMs,
   };
   state.responseCache.set(cacheKey, entry);
-  localStorage.setItem(`${CACHE_PREFIX}${cacheKey}`, JSON.stringify(entry));
+  try {
+    localStorage.setItem(`${CACHE_PREFIX}${cacheKey}`, JSON.stringify(entry));
+  } catch {}
 }
 
 function sleep(ms) {
