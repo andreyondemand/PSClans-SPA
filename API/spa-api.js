@@ -45,6 +45,9 @@ const PINNED_CLANS = [
   "UN0",
   "FGZW",
   "XPQX",
+  "taux",
+  "s7py",
+  "7hrw"
 ];
 
 let activeBattle = "";
@@ -258,7 +261,7 @@ async function handleRequest(request) {
 
 function handleMessageRequest(headers) {
   const messageJson = {
-    message: "website might not load properly due to limited resources",
+    message: "psclans isn't shutting down! More info in the Discord",
     color: "darkblue",
     visible: true,
     status: "success",
