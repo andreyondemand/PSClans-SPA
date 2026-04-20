@@ -527,8 +527,11 @@ async function renderClan(params, nonce) {
     setLoadingElements(loadingEl, ["#member-changes-count", "#memberChangesCarousel", "#membersGrid", "#membersTable", "#points-gained-day"]);
     const historyPage = await fetchClanHistoryPage(clanLower, { limit: CLAN_HISTORY_PAGE_LIMIT });
     const history = historyPage.history;
-    const has24hCoverage = hasHistoryCoverage(history, DAY_MS);
-    if (has24hCoverage) {
+    const historyUnavailable = historyPage.meta.failed;
+    const has24hCoverage = !historyUnavailable && hasHistoryCoverage(history, DAY_MS);
+    if (historyUnavailable) {
+      document.getElementById("points-gained-day").textContent = "History temporarily unavailable";
+    } else if (has24hCoverage) {
       document.getElementById("points-gained-day").textContent = `${formatNumber(
         getClanPointsGainedLastDay(history, currentBattle?.Points || 0)
       )} points`;
@@ -570,7 +573,7 @@ async function renderClan(params, nonce) {
       labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
     });
 
-    const timelineMap = buildTimelineMap(history, activeBattle);
+    const timelineMap = historyUnavailable ? null : buildTimelineMap(history, activeBattle);
 
     if (nonce !== state.routeNonce) {
       return;
@@ -1019,8 +1022,8 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
       <h4 class="player-place">#${place}</h4>
       <p class="player-name">${escapeHtml(username)}</p>
       <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(member.Points)} Points</p>
-      <p class="LastHour">Last hour: ${formatNumber(gainedLastHour)} points</p>
-      <p class="LastDay">Last day: ${formatNumber(gained)} points</p>
+      <p class="LastHour">Last hour: ${formatGainValue(gainedLastHour)}</p>
+      <p class="LastDay">Last day: ${formatGainValue(gained)}</p>
     `;
 
     grid.appendChild(card);
@@ -1094,8 +1097,8 @@ function renderMembersList(rows, usernameMap, timelineMap, clanData, clanLower, 
       <td data-label="Place">#${member.place}</td>
       <td class="player-name" data-label="Player">${escapeHtml(member.username)}</td>
       <td class="points" data-label="Points">${formatNumber(member.Points)}</td>
-      <td data-label="Last hour">Last hour: ${formatNumber(member.gainedLastHour)} points</td>
-      <td data-label="Last day">Last day: ${formatNumber(member.gainedLastDay)} points</td>
+      <td data-label="Last hour">Last hour: ${formatGainValue(member.gainedLastHour)}</td>
+      <td data-label="Last day">Last day: ${formatGainValue(member.gainedLastDay)}</td>
     `;
 
     tbody.appendChild(row);
@@ -1115,15 +1118,15 @@ function sortMembers(rows, sortMode, timelineMap) {
   if (sortMode === "hourly_high_low") {
     return rows.sort(
       (a, b) =>
-        getGainedLastHour(b.UserID, b.Points, timelineMap) -
-        getGainedLastHour(a.UserID, a.Points, timelineMap)
+        getGainSortValue(getGainedLastHour(b.UserID, b.Points, timelineMap)) -
+        getGainSortValue(getGainedLastHour(a.UserID, a.Points, timelineMap))
     );
   }
   if (sortMode === "hourly_low_high") {
     return rows.sort(
       (a, b) =>
-        getGainedLastHour(a.UserID, a.Points, timelineMap) -
-        getGainedLastHour(b.UserID, b.Points, timelineMap)
+        getGainSortValue(getGainedLastHour(a.UserID, a.Points, timelineMap)) -
+        getGainSortValue(getGainedLastHour(b.UserID, b.Points, timelineMap))
     );
   }
   return rows.sort((a, b) => b.Points - a.Points);
@@ -1161,10 +1164,10 @@ function sortMemberListRows(rows) {
       return (a.Points - b.Points) * direction;
     }
     if (state.memberListSort.key === "lastHour") {
-      return (a.gainedLastHour - b.gainedLastHour) * direction;
+      return (getGainSortValue(a.gainedLastHour) - getGainSortValue(b.gainedLastHour)) * direction;
     }
     if (state.memberListSort.key === "lastDay") {
-      return (a.gainedLastDay - b.gainedLastDay) * direction;
+      return (getGainSortValue(a.gainedLastDay) - getGainSortValue(b.gainedLastDay)) * direction;
     }
     return 0;
   });
@@ -1221,6 +1224,10 @@ function getGainedLastHour(userId, currentPoints, timelineMap) {
 }
 
 function getGainedSince(userId, currentPoints, timelineMap, windowMs) {
+  if (!(timelineMap instanceof Map)) {
+    return null;
+  }
+
   const timeline = timelineMap.get(userId) || [];
   if (timeline.length === 0) {
     return 0;
@@ -1233,6 +1240,14 @@ function getGainedSince(userId, currentPoints, timelineMap, windowMs) {
   }
 
   return Math.max(currentPoints - recent.Points, 0);
+}
+
+function getGainSortValue(value) {
+  return Number.isFinite(value) ? value : -1;
+}
+
+function formatGainValue(value) {
+  return Number.isFinite(value) ? `${formatNumber(value)} points` : "History unavailable";
 }
 
 function getClanPointsGainedLastDay(history, currentPoints) {
@@ -1538,6 +1553,12 @@ function updatePopupHistoryStatus() {
     return;
   }
 
+  if (state.popupTimelineMeta?.failed) {
+    popupHistoryStatusEl.textContent = "History temporarily unavailable.";
+    popupLoadOlderBtn.classList.add("hidden");
+    return;
+  }
+
   if (state.popupTimelineMeta?.hasMore && state.popupTimelineMeta.oldestTimestamp) {
     popupHistoryStatusEl.textContent = "Partial history loaded.";
     popupLoadOlderBtn.classList.remove("hidden");
@@ -1685,13 +1706,17 @@ async function fetchClanHistoryPage(clanLower, options = {}) {
     const payload = await fetchJSONCached(`${WORKER_API}/clan?${params.toString()}`, {
       cacheKey,
       ttlMs: CACHE_TTL_MS.clanHistory,
+      allowStaleOnError: false,
     });
     const history = normalizeHistoryPayload(payload, clanLower);
     const meta = normalizeHistoryMeta(payload?.meta, history);
     return { history, meta };
-  } catch {}
-
-  return { history: [], meta: normalizeHistoryMeta(null, []) };
+  } catch {
+    return {
+      history: [],
+      meta: normalizeHistoryMeta({ failed: true }, []),
+    };
+  }
 }
 
 async function fetchClanHistory(clanLower, options = {}) {
@@ -1911,6 +1936,7 @@ function normalizeHistoryMeta(meta, history) {
   const limit = Number.isFinite(Number(meta?.limit)) ? Number(meta.limit) : null;
   const returned = Number.isFinite(Number(meta?.returned)) ? Number(meta.returned) : history.length;
   return {
+    failed: Boolean(meta?.failed),
     hasMore,
     limit,
     returned,
