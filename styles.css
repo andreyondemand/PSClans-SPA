@@ -183,6 +183,17 @@ p {
   color: var(--sub-text-color);
 }
 
+.battle-status-notice {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #d2a72d;
+  border-radius: 8px;
+  background: #2e2409;
+  color: #ffe49b;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 .points {
   margin: var(--spacing) 0;
   padding: 15px;

@@ -48,6 +48,7 @@ const state = {
   popupTimelineMeta: null,
   popupHistoryLoading: false,
   activeBattle: "",
+  activeBattleEndTime: 0,
   trackedClans: null,
   trackedClansFetchedAt: 0,
   assetIconCache: new Map(),
@@ -82,7 +83,9 @@ async function init() {
   if (!window.location.hash) {
     window.location.hash = "#/";
   }
-  state.activeBattle = await fetchActiveBattleName();
+  const activeBattleInfo = await fetchActiveBattleInfo();
+  state.activeBattle = activeBattleInfo.name;
+  state.activeBattleEndTime = activeBattleInfo.endTime;
   await loadAnnouncement();
   renderRoute();
 }
@@ -426,6 +429,7 @@ async function renderClan(params, nonce) {
                 <p><strong><img class="icon" src="${ASSET_BASE}/icon_medal_gold.webp" alt="rank" /> Battle Leaderboard Place:</strong> <span id="battle-place"></span></p>
               </div>
             </div>
+            <div id="battle-status-notice" class="battle-status-notice hidden"></div>
           </div>
           <div class="info">
             <p><strong><img class="icon" src="${ASSET_BASE}/recycle.png" alt="changes" /> Member changes in the last 24 hours:</strong> <span id="member-changes-count"></span></p>
@@ -490,7 +494,12 @@ async function renderClan(params, nonce) {
 
   try {
     setLoadingElements(loadingEl, ["#battle-place", "#battle-points", "#guild-level"]);
-    const activeBattle = state.activeBattle || (await fetchActiveBattleName());
+    if (!state.activeBattle) {
+      const activeBattleInfo = await fetchActiveBattleInfo();
+      state.activeBattle = activeBattleInfo.name;
+      state.activeBattleEndTime = activeBattleInfo.endTime;
+    }
+    const activeBattle = state.activeBattle;
     setLoadingElements(loadingEl, ["#guild-name", "#guild-desc", "#guild-icon"]);
     const clanData = await fetchClanData(clanName);
 
@@ -514,6 +523,8 @@ async function renderClan(params, nonce) {
     document.getElementById("guild-desc").textContent = clanData.Desc || "";
 
     const currentBattle = clanData.Battles?.[activeBattle];
+    const battleIsOver = isBattleOver(state.activeBattleEndTime);
+    renderBattleStatusNotice(battleIsOver, activeBattle, state.activeBattleEndTime);
     document.getElementById("battle-place").textContent = currentBattle?.Place || "N/A";
     document.getElementById("guild-level").textContent = clanData.GuildLevel ?? "N/A";
     document.getElementById("battle-points").textContent = formatNumber(currentBattle?.Points || 0);
@@ -529,7 +540,9 @@ async function renderClan(params, nonce) {
     const history = historyPage.history;
     const historyUnavailable = historyPage.meta.failed;
     const has24hCoverage = !historyUnavailable && hasHistoryCoverage(history, DAY_MS);
-    if (historyUnavailable) {
+    if (battleIsOver) {
+      document.getElementById("points-gained-day").textContent = "Battle ended";
+    } else if (historyUnavailable) {
       document.getElementById("points-gained-day").textContent = "History temporarily unavailable";
     } else if (has24hCoverage) {
       document.getElementById("points-gained-day").textContent = `${formatNumber(
@@ -544,7 +557,11 @@ async function renderClan(params, nonce) {
     document.getElementById("member-changes-count").textContent = formatNumber(countRecentChanges(changes));
 
     setLoadingElements(loadingEl, ["#points-needed", "#points-time-estimate", "#points-needed2"]);
-    await populatePointsNeeded(clanLower, history);
+    if (battleIsOver) {
+      markBattlePaceStatsEnded();
+    } else {
+      await populatePointsNeeded(clanLower, history);
+    }
     setLoadingElements(loadingEl, ["#memberChangesCarousel"]);
     await populateMemberChangesCarousel(changes, clanLower, nonce, (label) => setLoadingItem(loadingEl, label));
     populatePreviousBattles(clanData, activeBattle);
@@ -861,6 +878,43 @@ function getMedalIcon(index) {
     return `${ASSET_BASE}/icon_medal_bronze.png`;
   }
   return "";
+}
+
+function isBattleOver(endTime) {
+  const finishSeconds = Number(endTime);
+  return Number.isFinite(finishSeconds) && finishSeconds > 0 && Date.now() >= finishSeconds * 1000;
+}
+
+function renderBattleStatusNotice(battleIsOver, activeBattle, endTime) {
+  const notice = document.getElementById("battle-status-notice");
+  if (!notice) {
+    return;
+  }
+
+  notice.classList.toggle("hidden", !battleIsOver);
+  if (!battleIsOver) {
+    notice.textContent = "";
+    return;
+  }
+
+  const endedAt = formatTimestamp(Number(endTime) * 1000);
+  notice.textContent = `${activeBattle || "This clan battle"} is over. Final standings are shown; recent history and pace estimates are no longer available. Ended ${endedAt}.`;
+}
+
+function markBattlePaceStatsEnded() {
+  const pointsNeeded = document.getElementById("points-needed");
+  const pointsTimeEstimate = document.getElementById("points-time-estimate");
+  const pointsNeeded2 = document.getElementById("points-needed2");
+
+  if (pointsNeeded) {
+    pointsNeeded.textContent = "Battle ended";
+  }
+  if (pointsTimeEstimate) {
+    pointsTimeEstimate.textContent = "Battle ended";
+  }
+  if (pointsNeeded2) {
+    pointsNeeded2.textContent = "Battle ended";
+  }
 }
 
 async function populatePointsNeeded(clanLower, currentClanHistory = null) {
@@ -1757,13 +1811,21 @@ async function fetchClanUserTimelinePage(clanLower, userId, options = {}) {
   return { timeline, meta };
 }
 
-async function fetchActiveBattleName() {
+async function fetchActiveBattleInfo() {
   try {
     const payload = await fetchJSON(`${BIG_API}/activeClanBattle`);
-    return payload?.data?.configName || "";
+    return {
+      name: payload?.data?.configName || "",
+      endTime: Number(payload?.data?.configData?.FinishTime) || 0,
+    };
   } catch {
-    return "";
+    return { name: "", endTime: 0 };
   }
+}
+
+async function fetchActiveBattleName() {
+  const activeBattleInfo = await fetchActiveBattleInfo();
+  return activeBattleInfo.name;
 }
 
 async function fetchClanLeaderboard(pageSize) {
