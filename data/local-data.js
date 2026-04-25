@@ -1,4 +1,8 @@
 export const FALLBACK_PINNED_CLANS = [
+  "DACE",
+  "JKUS",
+  "3zEZ",
+  "EsPa",
   "KOR_",
   "GANG",
   "K0ii",

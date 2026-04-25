@@ -934,11 +934,16 @@ async function populateMemberChangesCarousel(changes, clanLower, nonce, onProgre
 
   const sorted = [...changes].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
   const ids = sorted.map((entry) => entry.UserID);
-  const usernameMap = await resolveClanUsernames(clanLower, ids, { onProgress });
-  await resolveUserAvatarsBatch(ids, {
-    onProgress,
-    labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
-  });
+  let usernameMap = {};
+  try {
+    usernameMap = await resolveClanUsernames(clanLower, ids, { onProgress });
+    await resolveUserAvatarsBatch(ids, {
+      onProgress,
+      labelById: (id) => `@${usernameMap[id] || id} (user ${id})`,
+    });
+  } catch {
+    usernameMap = Object.fromEntries(ids.map((id) => [id, String(id)]));
+  }
 
   if (nonce !== state.routeNonce) {
     return;
@@ -1789,7 +1794,7 @@ async function resolveClanUsernames(clanLower, userIds, options = {}) {
         if (Number.isFinite(userId) && name) {
           map[userId] = name;
           state.usernameCache.set(userId, name);
-          localStorage.setItem(`psc_username_${userId}`, name);
+          safeLocalStorageSet(`psc_username_${userId}`, name);
           if (requested.has(userId) && onProgress) {
             onProgress(`username @${name} (user ${userId})`);
           }
@@ -1799,7 +1804,7 @@ async function resolveClanUsernames(clanLower, userIds, options = {}) {
   } catch {}
 
   const missingIds = uniqueIds.filter((id) => !map[id]);
-  const fallbackMap = await resolveUsernamesBatch(missingIds, { onProgress });
+  const fallbackMap = await resolveUsernamesBatch(missingIds, { onProgress }).catch(() => ({}));
   Object.assign(map, fallbackMap);
 
   uniqueIds.forEach((id) => {
@@ -1837,7 +1842,7 @@ async function resolveUsernamesBatch(userIds, options = {}) {
 
   for (const id of stillMissing) {
     const storageKey = `psc_username_${id}`;
-    const saved = localStorage.getItem(storageKey);
+    const saved = safeLocalStorageGet(storageKey);
     if (saved) {
       result[id] = saved;
       state.usernameCache.set(id, saved);
@@ -1858,7 +1863,7 @@ async function resolveUsernamesBatch(userIds, options = {}) {
       onProgress(`username @${username} (user ${id})`);
     }
     if (payload?.name) {
-      localStorage.setItem(storageKey, payload.name);
+      safeLocalStorageSet(storageKey, payload.name);
     }
   }
 
@@ -1887,7 +1892,7 @@ async function resolveUsernamesViaUsersApi(userIds, options = {}) {
       }
       resolved[userId] = username;
       state.usernameCache.set(userId, username);
-      localStorage.setItem(`psc_username_${userId}`, username);
+      safeLocalStorageSet(`psc_username_${userId}`, username);
       if (onProgress) {
         onProgress(`username @${username} (user ${userId})`);
       }
@@ -2002,12 +2007,32 @@ async function resolveUserAvatarsBatch(userIds, options = {}) {
   }
 }
 
-async function fetchJSON(url, options) {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+async function fetchJSON(url, options, config = {}) {
+  const retryStatuses = config.retryStatuses || [429, 500, 502, 503, 504];
+  const maxRetries = Number.isFinite(Number(config.maxRetries)) ? Number(config.maxRetries) : 2;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) {
+        return await response.json();
+      }
+      lastError = new Error(`${response.status} ${response.statusText}`);
+      if (!retryStatuses.includes(response.status) || attempt === maxRetries) {
+        throw lastError;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxRetries) {
+        throw error;
+      }
+    }
+
+    await sleep(Math.min(400 * 2 ** attempt, 2000));
   }
-  return await response.json();
+
+  throw lastError || new Error("Request failed");
 }
 
 async function fetchJSONCached(url, config = {}) {
@@ -2031,7 +2056,7 @@ async function fetchJSONCached(url, config = {}) {
       await throttleWorkerRequests();
     }
 
-    const payload = await fetchJSON(url, config.fetchOptions);
+    const payload = await fetchJSON(url, config.fetchOptions, config);
     if (ttlMs > 0) {
       writeCachedEntry(cacheKey, payload, ttlMs);
     }
@@ -2082,7 +2107,7 @@ function readStoredCacheEntry(cacheKey) {
     return null;
   }
 
-  const raw = localStorage.getItem(`${CACHE_PREFIX}${cacheKey}`);
+  const raw = safeLocalStorageGet(`${CACHE_PREFIX}${cacheKey}`);
   if (!raw) {
     return null;
   }
@@ -2111,12 +2136,26 @@ function writeCachedEntry(cacheKey, value, ttlMs) {
     return;
   }
   try {
-    localStorage.setItem(`${CACHE_PREFIX}${cacheKey}`, JSON.stringify(entry));
+    safeLocalStorageSet(`${CACHE_PREFIX}${cacheKey}`, JSON.stringify(entry));
   } catch {}
 }
 
 function shouldPersistCache(cacheKey) {
   return !String(cacheKey || "").startsWith("clan_history_");
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
 }
 
 function sleep(ms) {
