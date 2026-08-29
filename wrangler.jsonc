@@ -16,6 +16,17 @@
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
+  "ratelimits": [
+    {
+      "name": "API_RATE_LIMITER",
+      // Repository ID used as an account-unique numeric namespace.
+      "namespace_id": "1214601879",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
   "d1_databases": [
     {
       "binding": "D1_DB",

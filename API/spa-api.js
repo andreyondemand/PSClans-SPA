@@ -3,12 +3,21 @@ const DEFAULT_MAX_RETRIES = 4;
 const BASE_BACKOFF_MS = 400;
 const MAX_BACKOFF_MS = 8000;
 const DEFAULT_MIN_REQUEST_INTERVAL_MS = 120;
+const DEFAULT_FETCH_TIMEOUT_MS = 8000;
+const DEFAULT_FETCH_BUDGET_MS = 25000;
+const MAX_RETRY_AFTER_MS = 10000;
 const LOCAL_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_CLAN_FETCHES_PER_RUN = 30;
 const MAX_CHANGES_BATCH_CLANS = 30;
+const MAX_CHANGES_QUERY_LENGTH = 1024;
 const MAX_USERNAMES_BATCH_IDS = 200;
+const MAX_USERNAMES_QUERY_LENGTH = 4096;
+const MAX_USERNAME_CACHE_ROWS = 5000;
+const MAX_CLAN_NAME_LENGTH = 64;
 const MAX_CLAN_HISTORY_LIMIT = 2000;
 const DEFAULT_CLAN_HISTORY_LIMIT = MAX_CLAN_HISTORY_LIMIT;
+const SCHEDULER_FRESHNESS_SECONDS = 20 * 60;
+const RATE_LIMITED_PATHS = new Set(["/health", "/clans", "/changes", "/clan", "/usernames"]);
 const PINNED_CLANS = [
   "DACE",
   "JKUS",
@@ -54,21 +63,47 @@ const PINNED_CLANS = [
   "7hrw"
 ];
 
-function createRuntime(env) {
+class UpstreamRequestError extends Error {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = "UpstreamRequestError";
+  }
+}
+
+class UpstreamTimeoutError extends UpstreamRequestError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = "UpstreamTimeoutError";
+  }
+}
+
+function createRuntime(env, options = {}) {
+  const scheduled = Boolean(options.scheduled);
   return {
     db: env?.D1_DB,
+    rateLimiter: env?.API_RATE_LIMITER,
     nextAllowedRequestTime: 0,
     localCache: new Map(),
+    fetchPolicy: scheduled
+      ? { maxRetries: 4, timeoutMs: 10000, budgetMs: 60000 }
+      : { maxRetries: 2, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS, budgetMs: DEFAULT_FETCH_BUDGET_MS },
   };
 }
 
 export default {
   async fetch(request, env) {
-    return handleRequest(request, createRuntime(env));
+    const runtime = createRuntime(env);
+    try {
+      return await handleRequest(request, runtime);
+    } catch (error) {
+      return createErrorResponse(error, createJsonHeaders(), "Unhandled request failure");
+    }
   },
   async scheduled(_controller, env, ctx) {
-    const runtime = createRuntime(env);
-    ctx.waitUntil(fetchAndUpdatePoints(runtime).catch((error) => console.error("Scheduled fetch failed:", error)));
+    const runtime = createRuntime(env, { scheduled: true });
+    ctx.waitUntil(runScheduledUpdate(runtime).catch((error) => {
+      logError("Scheduled fetch failed", error);
+    }));
   },
 };
 
@@ -78,7 +113,38 @@ function createJsonHeaders() {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
   };
+}
+
+function logEvent(level, message, details = {}, error = null) {
+  const payload = {
+    message,
+    ...details,
+  };
+  if (error) {
+    payload.error = error instanceof Error ? error.message : String(error);
+  }
+  const method = level === "error" ? "error" : level === "warn" ? "warn" : "log";
+  console[method](JSON.stringify(payload));
+}
+
+function logError(message, error, details = {}) {
+  logEvent("error", message, details, error);
+}
+
+function logWarn(message, error, details = {}) {
+  logEvent("warn", message, details, error);
+}
+
+function createErrorResponse(error, headers, context) {
+  const isTimeout = error instanceof UpstreamTimeoutError;
+  const isUpstream = error instanceof UpstreamRequestError;
+  const status = isTimeout ? 504 : isUpstream ? 502 : 500;
+  const code = isTimeout ? "upstream_timeout" : isUpstream ? "upstream_failure" : "internal_error";
+  logError(context, error, { status, code });
+  return new Response(JSON.stringify({ error: code }), { status, headers });
 }
 
 function sleep(ms) {
@@ -110,11 +176,34 @@ async function dbRun(runtime, query, params = []) {
   await getDB(runtime).prepare(query).bind(...params).run();
 }
 
+async function cleanupUsernameCache(runtime) {
+  await dbRun(runtime, "DELETE FROM username_cache WHERE expires_at <= ?", [nowSeconds()]);
+  await dbRun(
+    runtime,
+    `DELETE FROM username_cache
+     WHERE clan_name NOT IN (
+       SELECT clan_name
+       FROM username_cache
+       ORDER BY updated_at DESC
+       LIMIT ?
+     )`,
+    [MAX_USERNAME_CACHE_ROWS]
+  );
+}
+
 function parseJson(value, fallback) {
   try {
     return JSON.parse(value);
   } catch {
     return fallback;
+  }
+}
+
+async function readUpstreamJson(response, label) {
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new UpstreamRequestError(`${label} returned invalid JSON`, { cause: error });
   }
 }
 
@@ -126,12 +215,12 @@ function parseRetryAfterMs(response) {
 
   const seconds = Number(retryAfter);
   if (Number.isFinite(seconds)) {
-    return Math.max(0, seconds * 1000);
+    return Math.min(Math.max(0, seconds * 1000), MAX_RETRY_AFTER_MS);
   }
 
   const dateMs = Date.parse(retryAfter);
   if (Number.isFinite(dateMs)) {
-    return Math.max(0, dateMs - Date.now());
+    return Math.min(Math.max(0, dateMs - Date.now()), MAX_RETRY_AFTER_MS);
   }
 
   return null;
@@ -168,11 +257,80 @@ function setLocalCache(runtime, key, value, ttlMs = LOCAL_CACHE_TTL_MS) {
 }
 
 function parsePositiveInt(value) {
-  const parsed = Number.parseInt(value || "", 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  const normalized = String(value || "").trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) {
     return null;
   }
   return parsed;
+}
+
+function parseClanName(value) {
+  const clanName = String(value || "").trim().toLowerCase();
+  if (!clanName) {
+    return { error: "Missing clan name" };
+  }
+  if (clanName.length > MAX_CLAN_NAME_LENGTH || /[\u0000-\u001f\u007f]/.test(clanName)) {
+    return { error: "Invalid clan name" };
+  }
+  return { value: clanName };
+}
+
+function parseClanList(value) {
+  const raw = String(value || "");
+  if (!raw) {
+    return { value: [] };
+  }
+  if (raw.length > MAX_CHANGES_QUERY_LENGTH) {
+    return { error: "Clan list is too long" };
+  }
+
+  const tokens = raw.split(",");
+  if (tokens.length > MAX_CHANGES_BATCH_CLANS) {
+    return { error: `Too many clans requested. Max ${MAX_CHANGES_BATCH_CLANS}.` };
+  }
+
+  const clans = [];
+  for (const token of tokens) {
+    const parsed = parseClanName(token);
+    if (parsed.error) {
+      return { error: parsed.error };
+    }
+    clans.push(parsed.value);
+  }
+  return { value: [...new Set(clans)] };
+}
+
+function parseUserIds(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return { error: "Missing user ids" };
+  }
+  if (raw.length > MAX_USERNAMES_QUERY_LENGTH) {
+    return { error: "User id list is too long" };
+  }
+
+  const tokens = raw.split(",");
+  if (tokens.length > MAX_USERNAMES_BATCH_IDS) {
+    return { error: `Too many ids requested. Max ${MAX_USERNAMES_BATCH_IDS}.` };
+  }
+
+  const ids = [];
+  for (const token of tokens) {
+    const normalized = token.trim();
+    if (!/^[1-9]\d*$/.test(normalized)) {
+      return { error: "Invalid user id" };
+    }
+    const id = Number(normalized);
+    if (!Number.isSafeInteger(id)) {
+      return { error: "Invalid user id" };
+    }
+    ids.push(id);
+  }
+  return { value: [...new Set(ids)] };
 }
 
 function parseTimestampMs(value) {
@@ -190,26 +348,40 @@ function parseTimestampMs(value) {
     return null;
   }
 
-  if (asNumber > 1_000_000_000_000) {
-    return asNumber;
+  const timestampMs = Math.abs(asNumber) > 1_000_000_000_000 ? asNumber : asNumber * 1000;
+  if (!Number.isFinite(timestampMs) || Math.abs(timestampMs) > 8_640_000_000_000_000) {
+    return null;
   }
-  return asNumber * 1000;
+  return timestampMs;
 }
 
 async function fetchWithRateLimit(runtime, url, options = {}, config = {}) {
+  const policy = runtime?.fetchPolicy || {};
   const {
-    maxRetries = DEFAULT_MAX_RETRIES,
+    maxRetries = policy.maxRetries ?? DEFAULT_MAX_RETRIES,
     minIntervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS,
     retryStatuses = [429, 500, 502, 503, 504],
+    timeoutMs = policy.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
+    budgetMs = policy.budgetMs ?? DEFAULT_FETCH_BUDGET_MS,
   } = config;
 
   let lastError = null;
+  const deadlineMs = Date.now() + budgetMs;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const remainingBudgetMs = deadlineMs - Date.now();
+    if (remainingBudgetMs <= 0) {
+      throw new UpstreamTimeoutError("Upstream request exceeded its retry budget", { cause: lastError });
+    }
     await throttleRequests(runtime, minIntervalMs);
 
     try {
-      const response = await fetch(url, options);
+      const attemptTimeoutMs = Math.max(1, Math.min(timeoutMs, deadlineMs - Date.now()));
+      const timeoutSignal = AbortSignal.timeout(attemptTimeoutMs);
+      const signal = options.signal && typeof AbortSignal.any === "function"
+        ? AbortSignal.any([options.signal, timeoutSignal])
+        : options.signal || timeoutSignal;
+      const response = await fetch(url, { ...options, signal });
       if (!retryStatuses.includes(response.status)) {
         return response;
       }
@@ -221,21 +393,35 @@ async function fetchWithRateLimit(runtime, url, options = {}, config = {}) {
       const retryAfterMs = parseRetryAfterMs(response);
       const exponentialBackoffMs = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
       const jitterMs = Math.floor(Math.random() * 250);
-      const delayMs = retryAfterMs ?? (exponentialBackoffMs + jitterMs);
-      await sleep(delayMs);
+      const delayMs = Math.min(
+        retryAfterMs ?? (exponentialBackoffMs + jitterMs),
+        Math.max(0, deadlineMs - Date.now())
+      );
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
     } catch (error) {
-      lastError = error;
+      const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
+      lastError = timedOut
+        ? new UpstreamTimeoutError("Upstream request timed out", { cause: error })
+        : error;
       if (attempt === maxRetries) {
         break;
       }
 
       const exponentialBackoffMs = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
       const jitterMs = Math.floor(Math.random() * 250);
-      await sleep(exponentialBackoffMs + jitterMs);
+      const delayMs = Math.min(exponentialBackoffMs + jitterMs, Math.max(0, deadlineMs - Date.now()));
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
     }
   }
 
-  throw lastError || new Error("Request failed after retries");
+  if (lastError instanceof UpstreamRequestError) {
+    throw lastError;
+  }
+  throw new UpstreamRequestError("Upstream request failed after retries", { cause: lastError });
 }
 
 async function handleRequest(request, runtime) {
@@ -250,7 +436,20 @@ async function handleRequest(request, runtime) {
     return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers });
   }
 
+  if (RATE_LIMITED_PATHS.has(pathname)) {
+    const allowed = await enforceRateLimit(request, pathname, runtime);
+    if (!allowed) {
+      logEvent("warn", "API rate limit exceeded", { pathname });
+      return new Response(JSON.stringify({ error: "rate_limited" }), {
+        status: 429,
+        headers: { ...headers, "Retry-After": "60" },
+      });
+    }
+  }
+
   switch (pathname) {
+    case "/health":
+      return handleHealthRequest(headers, runtime);
     case "/message":
       return handleMessageRequest(headers);
     case "/pinned":
@@ -265,6 +464,57 @@ async function handleRequest(request, runtime) {
       return handleUsernamesRequest(url.searchParams, headers, runtime);
     default:
       return new Response("Invalid endpoint", { status: 404, headers });
+  }
+}
+
+async function enforceRateLimit(request, pathname, runtime) {
+  const limiter = runtime?.rateLimiter;
+  if (!limiter || typeof limiter.limit !== "function") {
+    return true;
+  }
+  const clientAddress = request.headers.get("CF-Connecting-IP") || "unknown";
+  const result = await limiter.limit({ key: `${pathname}:${clientAddress}` });
+  return result?.success === true;
+}
+
+async function handleHealthRequest(headers, runtime) {
+  try {
+    const row = await dbFirst(
+      runtime,
+      `SELECT state, battle_id, last_started_at, last_success_at, updated_at
+       FROM scheduler_status
+       WHERE id = 1
+       LIMIT 1`
+    );
+
+    if (!row) {
+      return new Response(JSON.stringify({
+        status: "degraded",
+        reason: "scheduler_has_not_reported",
+      }), { status: 503, headers });
+    }
+
+    const lastSuccessAt = Number(row.last_success_at) || 0;
+    const successAgeSeconds = lastSuccessAt > 0 ? Math.max(0, nowSeconds() - lastSuccessAt) : null;
+    const fresh = successAgeSeconds !== null && successAgeSeconds <= SCHEDULER_FRESHNESS_SECONDS;
+    const healthy = fresh && row.state !== "error";
+    return new Response(JSON.stringify({
+      status: healthy ? "ok" : "degraded",
+      scheduler: {
+        state: String(row.state || "unknown"),
+        battleId: row.battle_id || null,
+        lastStartedAt: Number(row.last_started_at) || null,
+        lastSuccessAt: lastSuccessAt || null,
+        successAgeSeconds,
+        fresh,
+      },
+    }), { status: healthy ? 200 : 503, headers });
+  } catch (error) {
+    logError("Health check failed", error);
+    return new Response(JSON.stringify({
+      status: "degraded",
+      reason: "health_check_failed",
+    }), { status: 503, headers });
   }
 }
 
@@ -299,35 +549,33 @@ async function handleClansRequest(headers, runtime) {
       headers,
     });
   } catch (error) {
-    console.error("Error loading clans:", error);
-    return new Response("Internal Server Error", { status: 500, headers });
+    return createErrorResponse(error, headers, "Error loading clans");
   }
 }
 
 async function handleChangesRequest(searchParams, headers, runtime) {
-  const clan = (searchParams.get("clan") || "").toLowerCase();
-  const clansParam = (searchParams.get("clans") || "").toLowerCase();
+  const clanRaw = searchParams.get("clan") || "";
+  const clanResult = clanRaw ? parseClanName(clanRaw) : { value: "" };
+  const clansResult = parseClanList(searchParams.get("clans") || "");
   const wantsCounts = searchParams.get("counts") === "1";
 
-  const clans = clansParam
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
+  if (clanResult.error || clansResult.error) {
+    return new Response(JSON.stringify({ error: clanResult.error || clansResult.error }), { status: 400, headers });
+  }
+
+  const clan = clanResult.value;
+  const clans = clansResult.value;
 
   if (!clan && clans.length === 0) {
-    return new Response("Missing clan name", { status: 400, headers });
+    return new Response(JSON.stringify({ error: "Missing clan name" }), { status: 400, headers });
   }
 
   try {
     const { battleId } = await fetchActiveBattle(runtime);
     if (clans.length > 0) {
-      const uniqueClans = [...new Set(clans)];
-      if (uniqueClans.length > MAX_CHANGES_BATCH_CLANS) {
-        return new Response(`Too many clans requested. Max ${MAX_CHANGES_BATCH_CLANS}.`, { status: 400, headers });
-      }
       const payload = wantsCounts
-        ? await getChangesCounts(runtime, battleId, uniqueClans)
-        : await getChangesBatch(runtime, battleId, uniqueClans);
+        ? await getChangesCounts(runtime, battleId, clans)
+        : await getChangesBatch(runtime, battleId, clans);
       return new Response(JSON.stringify(payload), {
         status: 200,
         headers,
@@ -348,35 +596,49 @@ async function handleChangesRequest(searchParams, headers, runtime) {
       headers,
     });
   } catch (error) {
-    console.error("Error loading changes:", error);
-    return new Response("Internal Server Error", { status: 500, headers });
+    return createErrorResponse(error, headers, "Error loading changes");
   }
 }
 
 async function handleClanRequest(searchParams, headers, runtime) {
-  const clan = (searchParams.get("clan") || "").toLowerCase();
-  const userId = Number.parseInt(searchParams.get("userId") || "", 10);
-  const requestedLimit = parsePositiveInt(searchParams.get("limit"));
+  const clanResult = parseClanName(searchParams.get("clan") || "");
+  const userIdRaw = searchParams.get("userId") || "";
+  const userIdResult = userIdRaw ? parseUserIds(userIdRaw) : { value: [] };
+  const limitRaw = searchParams.get("limit") || "";
+  const requestedLimit = parsePositiveInt(limitRaw);
   const historyLimit = Math.min(requestedLimit || DEFAULT_CLAN_HISTORY_LIMIT, MAX_CLAN_HISTORY_LIMIT);
   const beforeRaw = searchParams.get("before");
   const beforeMs = parseTimestampMs(beforeRaw);
 
-  if (!clan) {
-    return new Response("Clan not specified in the URL.", { status: 400, headers });
+  if (clanResult.error) {
+    return new Response(JSON.stringify({ error: clanResult.error }), { status: 400, headers });
   }
+  if (userIdResult.error || userIdResult.value.length > 1) {
+    return new Response(JSON.stringify({ error: "Invalid user id" }), { status: 400, headers });
+  }
+  if (limitRaw && requestedLimit === null) {
+    return new Response(JSON.stringify({ error: "Invalid history limit" }), { status: 400, headers });
+  }
+  const clan = clanResult.value;
+  const userId = userIdResult.value[0] ?? null;
   if (beforeRaw && beforeMs === null) {
-    return new Response("Invalid before timestamp.", { status: 400, headers });
+    return new Response(JSON.stringify({ error: "Invalid before timestamp" }), { status: 400, headers });
   }
 
   try {
     const { battleId } = await fetchActiveBattle(runtime);
 
-    let clanPointsData = await readClanSnapshots(runtime, battleId, clan, beforeMs);
-    if (clanPointsData.length === 0) {
+    const snapshotPage = await readClanSnapshots(runtime, battleId, clan, beforeMs, historyLimit + 1);
+    if (snapshotPage.length === 0) {
       return new Response("No data found", { status: 404, headers });
     }
+    const hasMore = snapshotPage.length > historyLimit;
+    const boundedPage = hasMore ? snapshotPage.slice(-historyLimit) : snapshotPage;
+    const oldestTimestamp = boundedPage[0]?.timestamp || null;
+    const newestTimestamp = boundedPage[boundedPage.length - 1]?.timestamp || null;
+    let clanPointsData = boundedPage;
 
-    if (Number.isFinite(userId)) {
+    if (userId !== null) {
       clanPointsData = clanPointsData.flatMap((entry) =>
         (entry?.data?.PointContributions || [])
           .filter((contribution) => contribution.UserID === userId)
@@ -387,20 +649,6 @@ async function handleClanRequest(searchParams, headers, runtime) {
           }))
       );
     }
-
-    if (beforeMs !== null) {
-      clanPointsData = clanPointsData.filter((entry) => {
-        const timestampMs = parseTimestampMs(entry?.timestamp);
-        return timestampMs !== null && timestampMs < beforeMs;
-      });
-    }
-
-    const hasMore = clanPointsData.length > historyLimit;
-    if (clanPointsData.length > historyLimit) {
-      clanPointsData = clanPointsData.slice(-historyLimit);
-    }
-    const oldestTimestamp = clanPointsData[0]?.timestamp || null;
-    const newestTimestamp = clanPointsData[clanPointsData.length - 1]?.timestamp || null;
 
     return new Response(JSON.stringify({
       history: clanPointsData,
@@ -417,34 +665,31 @@ async function handleClanRequest(searchParams, headers, runtime) {
       headers,
     });
   } catch (error) {
-    console.error("Error loading clan history:", error);
-    return new Response("Internal Server Error", { status: 500, headers });
+    return createErrorResponse(error, headers, "Error loading clan history");
   }
 }
 
 async function handleUsernamesRequest(searchParams, headers, runtime) {
   const idsParam = (searchParams.get("ids") || "").trim();
-  if (idsParam) {
-    const ids = [...new Set(
-      idsParam
-        .split(",")
-        .map((value) => Number.parseInt(value.trim(), 10))
-        .filter(Number.isFinite)
-    )];
+  try {
+    if (idsParam) {
+      const idsResult = parseUserIds(idsParam);
+      if (idsResult.error) {
+        return new Response(JSON.stringify({ error: idsResult.error }), { status: 400, headers });
+      }
 
-    if (ids.length > MAX_USERNAMES_BATCH_IDS) {
-      return new Response(`Too many ids requested. Max ${MAX_USERNAMES_BATCH_IDS}.`, { status: 400, headers });
+      const resolvedUsers = await resolveUsernames(runtime, idsResult.value);
+      return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
     }
 
-    const resolvedUsers = await resolveUsernames(runtime, ids);
-    return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
+    const clanResult = parseClanName(searchParams.get("clan") || "");
+    if (clanResult.error) {
+      return new Response(JSON.stringify({ error: "Missing or invalid clan name or ids" }), { status: 400, headers });
+    }
+    return await fetchClanUsernames(runtime, clanResult.value, headers);
+  } catch (error) {
+    return createErrorResponse(error, headers, "Error loading usernames");
   }
-
-  const clanName = (searchParams.get("clan") || "").toLowerCase();
-  if (!clanName) {
-    return new Response("Missing clan name or ids", { status: 400, headers });
-  }
-  return fetchClanUsernames(runtime, clanName, headers);
 }
 
 async function fetchClanUsernames(runtime, clanName, headers) {
@@ -471,10 +716,10 @@ async function fetchClanUsernames(runtime, clanName, headers) {
     `https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`
   );
   if (!response.ok) {
-    return new Response("Failed to fetch clan data", { status: 502, headers });
+    throw new UpstreamRequestError(`Clan request failed with ${response.status}`);
   }
 
-  const clanData = await response.json();
+  const clanData = await readUpstreamJson(response, "Clan request");
   const members = clanData?.data?.Members || [];
   const ownerID = clanData?.data?.Owner;
   const currentUserIDs = [ownerID, ...members.map((member) => member.UserID)].filter(Number.isFinite);
@@ -493,7 +738,12 @@ async function fetchClanUsernames(runtime, clanName, headers) {
       [clanName, JSON.stringify(resolvedUsers), ttlExpiresAt, nowSeconds()]
     );
   } catch (error) {
-    console.warn(`Failed username cache write for ${clanName}:`, error);
+    logWarn("Failed username cache write", error, { clanName });
+  }
+  try {
+    await cleanupUsernameCache(runtime);
+  } catch (error) {
+    logWarn("Failed username cache cleanup", error, { clanName });
   }
   setLocalCache(runtime, cacheKey, resolvedUsers);
 
@@ -505,46 +755,44 @@ async function resolveUsernames(runtime, userIDs) {
     return [];
   }
 
-  try {
-    const response = await fetchWithRateLimit(runtime, "https://users.roblox.com/v1/users", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        userIds: userIDs,
-        excludeBannedUsers: true,
-      }),
-    });
+  const response = await fetchWithRateLimit(runtime, "https://users.roblox.com/v1/users", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      userIds: userIDs,
+      excludeBannedUsers: true,
+    }),
+  });
 
-    if (!response.ok) {
-      return [];
-    }
-
-    const payload = await response.json();
-    return (payload?.data || []).map((user) => ({
-      id: user.id,
-      name: user.name,
-    }));
-  } catch (error) {
-    console.error("Batch username fetch failed:", error);
-    return [];
+  if (!response.ok) {
+    throw new UpstreamRequestError(`Roblox username request failed with ${response.status}`);
   }
+
+  const payload = await readUpstreamJson(response, "Roblox username request");
+  if (!Array.isArray(payload?.data)) {
+    throw new UpstreamRequestError("Roblox username request returned an invalid payload");
+  }
+  return payload.data.map((user) => ({
+    id: user.id,
+    name: user.name,
+  }));
 }
 
 async function fetchActiveBattle(runtime) {
   const response = await fetchWithRateLimit(runtime, "https://ps99.biggamesapi.io/api/activeClanBattle");
   if (!response.ok) {
-    throw new Error(`Active battle request failed with ${response.status}`);
+    throw new UpstreamRequestError(`Active battle request failed with ${response.status}`);
   }
-  const responseData = await response.json();
+  const responseData = await readUpstreamJson(response, "Active battle request");
 
   const battleId = responseData?.data?.configName || "";
   const endTime = responseData?.data?.configData?.FinishTime || 0;
 
   if (!battleId) {
-    throw new Error("Missing active battle configName");
+    throw new UpstreamRequestError("Active battle request is missing configName");
   }
   return { battleId, endTime };
 }
@@ -555,10 +803,13 @@ async function fetchTopClans(runtime) {
     "https://ps99.biggamesapi.io/api/clans?page=1&pageSize=35&sort=Points&sortOrder=desc"
   );
   if (!response.ok) {
-    throw new Error(`Top clans request failed with ${response.status}`);
+    throw new UpstreamRequestError(`Top clans request failed with ${response.status}`);
   }
-  const payload = await response.json();
-  return payload?.data || [];
+  const payload = await readUpstreamJson(response, "Top clans request");
+  if (!Array.isArray(payload?.data)) {
+    throw new UpstreamRequestError("Top clans request returned an invalid payload");
+  }
+  return payload.data;
 }
 
 async function fetchClanData(runtime, clanName) {
@@ -567,9 +818,9 @@ async function fetchClanData(runtime, clanName) {
     `https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`
   );
   if (!response.ok) {
-    throw new Error(`Clan ${clanName} request failed with ${response.status}`);
+    throw new UpstreamRequestError(`Clan ${clanName} request failed with ${response.status}`);
   }
-  return response.json();
+  return readUpstreamJson(response, `Clan ${clanName} request`);
 }
 
 function buildPointsSignature(pointsData) {
@@ -679,11 +930,59 @@ async function cleanupOldData(runtime, battleId, endTime) {
   return true;
 }
 
+async function tryRecordSchedulerStatus(runtime, state, options = {}) {
+  const now = nowSeconds();
+  const lastError = options.error
+    ? (options.error instanceof Error ? options.error.message : String(options.error)).slice(0, 500)
+    : null;
+  try {
+    await dbRun(
+      runtime,
+      `INSERT INTO scheduler_status
+         (id, state, battle_id, last_started_at, last_success_at, last_error, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         state = excluded.state,
+         battle_id = COALESCE(excluded.battle_id, scheduler_status.battle_id),
+         last_started_at = COALESCE(excluded.last_started_at, scheduler_status.last_started_at),
+         last_success_at = COALESCE(excluded.last_success_at, scheduler_status.last_success_at),
+         last_error = excluded.last_error,
+         updated_at = excluded.updated_at`,
+      [
+        state,
+        options.battleId || null,
+        options.started ? now : null,
+        options.succeeded ? now : null,
+        lastError,
+        now,
+      ]
+    );
+  } catch (error) {
+    logWarn("Failed to persist scheduler status", error, { state });
+  }
+}
+
+async function runScheduledUpdate(runtime) {
+  await tryRecordSchedulerStatus(runtime, "running", { started: true });
+  try {
+    const result = await fetchAndUpdatePoints(runtime);
+    await tryRecordSchedulerStatus(runtime, result.state, {
+      battleId: result.battleId,
+      succeeded: true,
+    });
+    logEvent("info", "Scheduled fetch completed", result);
+  } catch (error) {
+    await tryRecordSchedulerStatus(runtime, "error", { error });
+    throw error;
+  }
+}
+
 async function fetchAndUpdatePoints(runtime) {
+  await cleanupUsernameCache(runtime);
   const { battleId, endTime } = await fetchActiveBattle(runtime);
   const cleaned = await cleanupOldData(runtime, battleId, endTime);
   if (cleaned) {
-    return;
+    return { state: "idle", battleId, trackedClanCount: 0 };
   }
 
   const topClans = await fetchTopClans(runtime);
@@ -703,6 +1002,8 @@ async function fetchAndUpdatePoints(runtime) {
     clansBatch = clansToTrack.slice(0, MAX_CLAN_FETCHES_PER_RUN);
   }
 
+  let processedClanCount = 0;
+  let failedClanCount = 0;
   for (const clanName of clansBatch) {
     try {
       const clanData = await fetchClanData(runtime, clanName);
@@ -711,10 +1012,16 @@ async function fetchAndUpdatePoints(runtime) {
         : null;
       if (pointsData) {
         await updatePoints(runtime, battleId, clanName, pointsData);
+        processedClanCount += 1;
       }
     } catch (error) {
-      console.error(`Failed clan update for ${clanName}:`, error);
+      failedClanCount += 1;
+      logError("Failed clan update", error, { clanName, battleId });
     }
+  }
+
+  if (clansBatch.length > 0 && processedClanCount === 0) {
+    throw new UpstreamRequestError("Scheduled clan batch produced no usable updates");
   }
 
   const nextCursor = cursor + clansBatch.length >= clansToTrack.length ? 0 : cursor + clansBatch.length;
@@ -723,9 +1030,17 @@ async function fetchAndUpdatePoints(runtime) {
   }
 
   await syncTrackedClans(runtime, battleId, clansToTrack);
+  return {
+    state: "ok",
+    battleId,
+    trackedClanCount: clansToTrack.length,
+    processedClanCount,
+    failedClanCount,
+  };
 }
 
-async function readClanSnapshots(runtime, battleId, clanName, beforeMs) {
+async function readClanSnapshots(runtime, battleId, clanName, beforeMs, rowLimit) {
+  const boundedLimit = Math.max(1, Math.min(Number(rowLimit) || 1, MAX_CLAN_HISTORY_LIMIT + 1));
   let rows = [];
   if (beforeMs !== null) {
     rows = await dbAll(
@@ -733,8 +1048,9 @@ async function readClanSnapshots(runtime, battleId, clanName, beforeMs) {
       `SELECT timestamp, data_json
        FROM clan_snapshots
        WHERE battle_id = ? AND clan_name = ? AND timestamp < ?
-       ORDER BY timestamp ASC`,
-      [battleId, clanName, new Date(beforeMs).toISOString()]
+       ORDER BY timestamp DESC
+       LIMIT ?`,
+      [battleId, clanName, new Date(beforeMs).toISOString(), boundedLimit]
     );
   } else {
     rows = await dbAll(
@@ -742,8 +1058,9 @@ async function readClanSnapshots(runtime, battleId, clanName, beforeMs) {
       `SELECT timestamp, data_json
        FROM clan_snapshots
        WHERE battle_id = ? AND clan_name = ?
-       ORDER BY timestamp ASC`,
-      [battleId, clanName]
+       ORDER BY timestamp DESC
+       LIMIT ?`,
+      [battleId, clanName, boundedLimit]
     );
   }
 
@@ -759,7 +1076,7 @@ async function readClanSnapshots(runtime, battleId, clanName, beforeMs) {
       data: parsedData,
     });
   }
-  return history;
+  return history.reverse();
 }
 
 async function getBattleCursor(runtime, battleId) {

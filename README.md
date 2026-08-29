@@ -1,6 +1,31 @@
 # Pet Simulator Clans SPA
 
-This repo serves a single-page JavaScript app that can be hosted for free on GitHub Pages.
+> [!IMPORTANT]
+> **Maintenance status:** this project is not actively maintained. The hosted
+> site and API are provided on a best-effort basis with no uptime, support, or
+> response-time guarantee. Issues and pull requests may not be reviewed.
+
+This repository contains a static single-page JavaScript application for
+GitHub Pages and a Cloudflare Worker backed by D1.
+
+- Live site: <https://andreyondemand.github.io/PSClans-SPA/>
+- Public Worker: <https://psclans-spa.cloudflare-6apm0.workers.dev>
+
+## Local verification
+
+Node.js 24 is the documented development version; Node.js 22 or later is
+supported. Install exactly the dependency versions in `package-lock.json` and
+run the same checks used by CI:
+
+```bash
+npm ci
+npm run check
+npm test
+npm run worker:dry-run
+```
+
+`npm run worker:dev` starts a local Worker with scheduled-event testing
+enabled. D1 operations are local by default.
 
 ## Deploy on GitHub Pages
 
@@ -34,6 +59,7 @@ These redirect to the SPA route equivalents:
 The SPA now uses live API communication with request throttling and TTL caching:
 
 - Worker API (`https://psclans-spa.cloudflare-6apm0.workers.dev`)
+  - `/health`
   - `/message`
   - `/pinned`
   - `/clans`
@@ -56,24 +82,79 @@ Client-side behavior to reduce API volume:
 - Responses are cached in memory and `localStorage` with per-endpoint TTLs.
 - In-flight requests are deduplicated so concurrent views reuse the same request.
 
+## Data lifecycle and external dependencies
+
+- The Worker polls BIG Games every five minutes while a clan battle is active.
+- A tracked battle's D1 history is deleted 24 hours after its advertised finish
+  time. During the gap before another active battle, `/clans` can legitimately
+  return an empty array and clan history can return `404`.
+- `/health` distinguishes a healthy idle period from a stale or failed
+  scheduler.
+- The application depends on GitHub Pages, Cloudflare Workers and D1, BIG Games,
+  Roblox, RoProxy, cdnjs, and jsDelivr. Changes or outages in any of those
+  services can reduce functionality without a repository change.
+
 ## Worker deployment
 
 The Worker requires a Cloudflare D1 database bound as `D1_DB`. The checked-in
-`wrangler.jsonc` targets the existing production database and five-minute cron.
-To deploy this project:
+`wrangler.jsonc` targets the existing production database, rate limiter, and
+five-minute cron.
 
-1. Run `npx wrangler d1 migrations apply psclans-spa --remote`.
-2. Run `npx wrangler deploy`.
+> [!CAUTION]
+> The root Wrangler configuration points at production. Do not run `--remote`,
+> migration, deployment, rollback, or deletion commands unless you are the
+> authorized operator and have intentionally selected that target.
+
+For an authorized production deployment:
+
+1. Run `npm ci`, `npm run check`, `npm test`, and
+   `npm run worker:dry-run`.
+2. Export a recoverable D1 backup outside the repository or under the ignored
+   `backups/` directory:
+
+   ```bash
+   mkdir -p backups
+   npx wrangler d1 export psclans-spa --remote --output backups/pre-deploy.sql
+   ```
+
+3. Review and apply pending migrations:
+
+   ```bash
+   npx wrangler d1 migrations list psclans-spa --remote
+   npx wrangler d1 migrations apply psclans-spa --remote
+   ```
+
+4. Deploy the already-validated bundle with `npm run worker:deploy`.
+5. Verify `/health`, `/message`, `/clans`, and a known clan page after the next
+   scheduled interval. Use `npx wrangler tail --status error` when health is
+   degraded.
 
 For an independent deployment, create a D1 database with
 `npx wrangler d1 create psclans-spa` and replace the database ID in
 `wrangler.jsonc` before applying migrations.
 
 The initial migration creates the snapshot, membership-change, tracked-clan,
-battle-state, and username-cache tables used by `API/spa-api.js`.
+battle-state, and username-cache tables used by `API/spa-api.js`. Later
+migrations add operational health state.
 
-Run `npm test` for the Worker regression tests and `npm run check` for JavaScript
-syntax checks.
+GitHub Actions runs the syntax checks, Worker regression tests, and Wrangler dry
+run on every pull request and push to `main`. Dependabot checks npm and GitHub
+Actions dependencies monthly.
+
+Account-level protections are not encoded by this repository. An operator who
+keeps the hosted service online should also:
+
+- require the `CI / verify` check before merging to `main`;
+- enable GitHub private vulnerability reporting;
+- monitor `/health` at an interval well below its 20-minute freshness window;
+- configure Cloudflare usage notifications or spending controls appropriate to
+  the account.
+
+## Security
+
+See [`SECURITY.md`](./SECURITY.md). There is no guaranteed security-response
+window for this maintenance-mode project. Do not publish exploit details or
+credentials in a public issue.
 
 ## License
 
