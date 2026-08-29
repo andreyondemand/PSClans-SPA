@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; base-uri 'self'; connect-src 'self' https://ps99.biggamesapi.io https://psclans-spa.cloudflare-6apm0.workers.dev https://users.roproxy.com https://thumbnails.roproxy.com; form-action 'self'; img-src 'self' data: https:; object-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests"
+      content="default-src 'self'; base-uri 'self'; connect-src 'self' https://ps99.biggamesapi.io https://psclans-spa.cloudflare-6apm0.workers.dev https://users.roproxy.com https://thumbnails.roproxy.com https://cloudflareinsights.com; form-action 'self'; img-src 'self' data: https:; object-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://static.cloudflareinsights.com/beacon.min.js; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests"
     />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>Pet Simulator Clans</title>
@@ -135,5 +135,12 @@
     </footer>
 
     <script type="module" src="./app.js"></script>
+    <!-- Cloudflare Web Analytics -->
+    <script
+      type="module"
+      src="https://static.cloudflareinsights.com/beacon.min.js"
+      data-cf-beacon='{"token":"409b5e1677914c33806bcc6e5d7b646d"}'
+    ></script>
+    <!-- End Cloudflare Web Analytics -->
   </body>
 </html>
