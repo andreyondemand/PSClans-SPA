@@ -56,6 +56,25 @@ Client-side behavior to reduce API volume:
 - Responses are cached in memory and `localStorage` with per-endpoint TTLs.
 - In-flight requests are deduplicated so concurrent views reuse the same request.
 
+## Worker deployment
+
+The Worker requires a Cloudflare D1 database bound as `D1_DB`. The checked-in
+`wrangler.jsonc` targets the existing production database and five-minute cron.
+To deploy this project:
+
+1. Run `npx wrangler d1 migrations apply psclans-spa --remote`.
+2. Run `npx wrangler deploy`.
+
+For an independent deployment, create a D1 database with
+`npx wrangler d1 create psclans-spa` and replace the database ID in
+`wrangler.jsonc` before applying migrations.
+
+The initial migration creates the snapshot, membership-change, tracked-clan,
+battle-state, and username-cache tables used by `API/spa-api.js`.
+
+Run `npm test` for the Worker regression tests and `npm run check` for JavaScript
+syntax checks.
+
 ## License
 
 Code in this repository is licensed under **GNU AGPL-3.0-or-later**.

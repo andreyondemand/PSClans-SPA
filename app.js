@@ -1655,7 +1655,7 @@ async function fetchTrackedClans() {
       throw new Error("Invalid tracked clans payload");
     }
 
-    state.trackedClans = [...new Set(payload.map((name) => String(name).toLowerCase()))].slice(0, 30);
+    state.trackedClans = [...new Set(payload.map((name) => String(name).toLowerCase()))];
     state.trackedClansFetchedAt = Date.now();
   } catch {
     try {
@@ -1666,7 +1666,7 @@ async function fetchTrackedClans() {
           ...FALLBACK_PINNED_CLANS.map((name) => name.toLowerCase()),
         ]),
       ];
-      state.trackedClans = merged.slice(0, 30);
+      state.trackedClans = merged;
       state.trackedClansFetchedAt = Date.now();
     } catch {
       state.trackedClans = [...new Set(FALLBACK_PINNED_CLANS.map((name) => name.toLowerCase()))];
@@ -1697,17 +1697,19 @@ async function fetchMemberChangesCountsBatch(clanLowers) {
   }
 
   try {
-    const clansParam = encodeURIComponent(unique.join(","));
-    const payload = await fetchJSONCached(`${WORKER_API}/changes?clans=${clansParam}&counts=1`, {
-      cacheKey: `clan_changes_counts_${unique.join(",")}`,
-      ttlMs: CACHE_TTL_MS.clanChanges,
-    });
-
     const countsByClan = {};
-    unique.forEach((clanLower) => {
-      const value = payload?.[clanLower];
-      countsByClan[clanLower] = Number.isFinite(value) ? value : 0;
-    });
+    const chunks = chunkArray(unique, 30);
+    for (const chunk of chunks) {
+      const clansParam = encodeURIComponent(chunk.join(","));
+      const payload = await fetchJSONCached(`${WORKER_API}/changes?clans=${clansParam}&counts=1`, {
+        cacheKey: `clan_changes_counts_${chunk.join(",")}`,
+        ttlMs: CACHE_TTL_MS.clanChanges,
+      });
+      chunk.forEach((clanLower) => {
+        const value = payload?.[clanLower];
+        countsByClan[clanLower] = Number.isFinite(value) ? value : 0;
+      });
+    }
     return countsByClan;
   } catch {
     const fallbackCounts = {};
@@ -2138,10 +2140,11 @@ async function fetchJSONCached(url, config = {}) {
 
 async function throttleWorkerRequests() {
   const now = Date.now();
-  if (state.nextWorkerRequestAt > now) {
-    await sleep(state.nextWorkerRequestAt - now);
+  const scheduledRequestTime = Math.max(now, state.nextWorkerRequestAt);
+  state.nextWorkerRequestAt = scheduledRequestTime + WORKER_MIN_INTERVAL_MS;
+  if (scheduledRequestTime > now) {
+    await sleep(scheduledRequestTime - now);
   }
-  state.nextWorkerRequestAt = Math.max(state.nextWorkerRequestAt, Date.now()) + WORKER_MIN_INTERVAL_MS;
 }
 
 function readCachedEntry(cacheKey) {

@@ -1,0 +1,9 @@
+{
+  "name": "psclans-spa",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check app.js && node --check API/spa-api.js",
+    "test": "node API/spa-api.test.js"
+  }
+}

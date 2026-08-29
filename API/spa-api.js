@@ -54,25 +54,21 @@ const PINNED_CLANS = [
   "7hrw"
 ];
 
-let activeBattle = "";
-let activeBattleEndTime = 0;
-let nextAllowedRequestTime = 0;
-const localCache = new Map();
-
-function setBindings(env) {
-  if (env?.D1_DB) {
-    globalThis.D1_DB = env.D1_DB;
-  }
+function createRuntime(env) {
+  return {
+    db: env?.D1_DB,
+    nextAllowedRequestTime: 0,
+    localCache: new Map(),
+  };
 }
 
 export default {
   async fetch(request, env) {
-    setBindings(env);
-    return handleRequest(request);
+    return handleRequest(request, createRuntime(env));
   },
   async scheduled(_controller, env, ctx) {
-    setBindings(env);
-    ctx.waitUntil(fetchAndUpdatePoints().catch((error) => console.error("Scheduled fetch failed:", error)));
+    const runtime = createRuntime(env);
+    ctx.waitUntil(fetchAndUpdatePoints(runtime).catch((error) => console.error("Scheduled fetch failed:", error)));
   },
 };
 
@@ -81,6 +77,7 @@ function createJsonHeaders() {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
   };
 }
 
@@ -92,25 +89,25 @@ function nowSeconds() {
   return Math.floor(Date.now() / 1000);
 }
 
-function getDB() {
-  const db = globalThis.D1_DB;
+function getDB(runtime) {
+  const db = runtime?.db;
   if (!db || typeof db.prepare !== "function") {
     throw new Error("Missing D1 binding: D1_DB");
   }
   return db;
 }
 
-async function dbFirst(query, params = []) {
-  return await getDB().prepare(query).bind(...params).first();
+async function dbFirst(runtime, query, params = []) {
+  return await getDB(runtime).prepare(query).bind(...params).first();
 }
 
-async function dbAll(query, params = []) {
-  const result = await getDB().prepare(query).bind(...params).all();
+async function dbAll(runtime, query, params = []) {
+  const result = await getDB(runtime).prepare(query).bind(...params).all();
   return Array.isArray(result?.results) ? result.results : [];
 }
 
-async function dbRun(query, params = []) {
-  await getDB().prepare(query).bind(...params).run();
+async function dbRun(runtime, query, params = []) {
+  await getDB(runtime).prepare(query).bind(...params).run();
 }
 
 function parseJson(value, fallback) {
@@ -140,30 +137,31 @@ function parseRetryAfterMs(response) {
   return null;
 }
 
-async function throttleRequests(intervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS) {
+async function throttleRequests(runtime, intervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS) {
   const now = Date.now();
-  if (nextAllowedRequestTime > now) {
-    await sleep(nextAllowedRequestTime - now);
+  const scheduledRequestTime = Math.max(now, runtime.nextAllowedRequestTime);
+  runtime.nextAllowedRequestTime = scheduledRequestTime + intervalMs;
+  if (scheduledRequestTime > now) {
+    await sleep(scheduledRequestTime - now);
   }
-  nextAllowedRequestTime = Math.max(nextAllowedRequestTime, Date.now()) + intervalMs;
 }
 
-function getLocalCache(key) {
-  const entry = localCache.get(key);
+function getLocalCache(runtime, key) {
+  const entry = runtime.localCache.get(key);
   if (!entry) {
     return null;
   }
 
   if (entry.expiresAt <= Date.now()) {
-    localCache.delete(key);
+    runtime.localCache.delete(key);
     return null;
   }
 
   return entry.value;
 }
 
-function setLocalCache(key, value, ttlMs = LOCAL_CACHE_TTL_MS) {
-  localCache.set(key, {
+function setLocalCache(runtime, key, value, ttlMs = LOCAL_CACHE_TTL_MS) {
+  runtime.localCache.set(key, {
     value,
     expiresAt: Date.now() + ttlMs,
   });
@@ -198,7 +196,7 @@ function parseTimestampMs(value) {
   return asNumber * 1000;
 }
 
-async function fetchWithRateLimit(url, options = {}, config = {}) {
+async function fetchWithRateLimit(runtime, url, options = {}, config = {}) {
   const {
     maxRetries = DEFAULT_MAX_RETRIES,
     minIntervalMs = DEFAULT_MIN_REQUEST_INTERVAL_MS,
@@ -208,7 +206,7 @@ async function fetchWithRateLimit(url, options = {}, config = {}) {
   let lastError = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    await throttleRequests(minIntervalMs);
+    await throttleRequests(runtime, minIntervalMs);
 
     try {
       const response = await fetch(url, options);
@@ -240,10 +238,17 @@ async function fetchWithRateLimit(url, options = {}, config = {}) {
   throw lastError || new Error("Request failed after retries");
 }
 
-async function handleRequest(request) {
+async function handleRequest(request, runtime) {
   const headers = createJsonHeaders();
   const url = new URL(request.url);
   const pathname = url.pathname;
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers });
+  }
+  if (request.method !== "GET") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), { status: 405, headers });
+  }
 
   switch (pathname) {
     case "/message":
@@ -251,13 +256,13 @@ async function handleRequest(request) {
     case "/pinned":
       return handlePinnedRequest(headers);
     case "/clans":
-      return handleClansRequest(headers);
+      return handleClansRequest(headers, runtime);
     case "/changes":
-      return handleChangesRequest(url.searchParams, headers);
+      return handleChangesRequest(url.searchParams, headers, runtime);
     case "/clan":
-      return handleClanRequest(url.searchParams, headers);
+      return handleClanRequest(url.searchParams, headers, runtime);
     case "/usernames":
-      return handleUsernamesRequest(url.searchParams, headers);
+      return handleUsernamesRequest(url.searchParams, headers, runtime);
     default:
       return new Response("Invalid endpoint", { status: 404, headers });
   }
@@ -284,10 +289,10 @@ function handlePinnedRequest(headers) {
   });
 }
 
-async function handleClansRequest(headers) {
+async function handleClansRequest(headers, runtime) {
   try {
-    await fetchActiveBattle();
-    const clans = await getTrackedClansList(activeBattle);
+    const { battleId } = await fetchActiveBattle(runtime);
+    const clans = await getTrackedClansList(runtime, battleId);
 
     return new Response(JSON.stringify(clans), {
       status: 200,
@@ -299,7 +304,7 @@ async function handleClansRequest(headers) {
   }
 }
 
-async function handleChangesRequest(searchParams, headers) {
+async function handleChangesRequest(searchParams, headers, runtime) {
   const clan = (searchParams.get("clan") || "").toLowerCase();
   const clansParam = (searchParams.get("clans") || "").toLowerCase();
   const wantsCounts = searchParams.get("counts") === "1";
@@ -314,13 +319,15 @@ async function handleChangesRequest(searchParams, headers) {
   }
 
   try {
-    await fetchActiveBattle();
+    const { battleId } = await fetchActiveBattle(runtime);
     if (clans.length > 0) {
       const uniqueClans = [...new Set(clans)];
       if (uniqueClans.length > MAX_CHANGES_BATCH_CLANS) {
         return new Response(`Too many clans requested. Max ${MAX_CHANGES_BATCH_CLANS}.`, { status: 400, headers });
       }
-      const payload = wantsCounts ? await getChangesCounts(uniqueClans) : await getChangesBatch(uniqueClans);
+      const payload = wantsCounts
+        ? await getChangesCounts(runtime, battleId, uniqueClans)
+        : await getChangesBatch(runtime, battleId, uniqueClans);
       return new Response(JSON.stringify(payload), {
         status: 200,
         headers,
@@ -328,14 +335,14 @@ async function handleChangesRequest(searchParams, headers) {
     }
 
     if (wantsCounts) {
-      const counts = await getChangesCounts([clan]);
+      const counts = await getChangesCounts(runtime, battleId, [clan]);
       return new Response(JSON.stringify(counts), {
         status: 200,
         headers,
       });
     }
 
-    const changes = await getChanges(clan);
+    const changes = await getChanges(runtime, battleId, clan);
     return new Response(JSON.stringify(changes), {
       status: 200,
       headers,
@@ -346,7 +353,7 @@ async function handleChangesRequest(searchParams, headers) {
   }
 }
 
-async function handleClanRequest(searchParams, headers) {
+async function handleClanRequest(searchParams, headers, runtime) {
   const clan = (searchParams.get("clan") || "").toLowerCase();
   const userId = Number.parseInt(searchParams.get("userId") || "", 10);
   const requestedLimit = parsePositiveInt(searchParams.get("limit"));
@@ -362,9 +369,9 @@ async function handleClanRequest(searchParams, headers) {
   }
 
   try {
-    await fetchActiveBattle();
+    const { battleId } = await fetchActiveBattle(runtime);
 
-    let clanPointsData = await readClanSnapshots(activeBattle, clan, beforeMs);
+    let clanPointsData = await readClanSnapshots(runtime, battleId, clan, beforeMs);
     if (clanPointsData.length === 0) {
       return new Response("No data found", { status: 404, headers });
     }
@@ -415,7 +422,7 @@ async function handleClanRequest(searchParams, headers) {
   }
 }
 
-async function handleUsernamesRequest(searchParams, headers) {
+async function handleUsernamesRequest(searchParams, headers, runtime) {
   const idsParam = (searchParams.get("ids") || "").trim();
   if (idsParam) {
     const ids = [...new Set(
@@ -429,7 +436,7 @@ async function handleUsernamesRequest(searchParams, headers) {
       return new Response(`Too many ids requested. Max ${MAX_USERNAMES_BATCH_IDS}.`, { status: 400, headers });
     }
 
-    const resolvedUsers = await resolveUsernames(ids);
+    const resolvedUsers = await resolveUsernames(runtime, ids);
     return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
   }
 
@@ -437,28 +444,32 @@ async function handleUsernamesRequest(searchParams, headers) {
   if (!clanName) {
     return new Response("Missing clan name or ids", { status: 400, headers });
   }
-  return fetchClanUsernames(clanName, headers);
+  return fetchClanUsernames(runtime, clanName, headers);
 }
 
-async function fetchClanUsernames(clanName, headers) {
+async function fetchClanUsernames(runtime, clanName, headers) {
   const cacheKey = `${clanName}_CACHE`;
-  const localCached = getLocalCache(cacheKey);
+  const localCached = getLocalCache(runtime, cacheKey);
   if (localCached) {
     return new Response(JSON.stringify(localCached), { status: 200, headers });
   }
 
   const cachedRow = await dbFirst(
+    runtime,
     "SELECT data_json, expires_at FROM username_cache WHERE clan_name = ? LIMIT 1",
     [clanName]
   );
   if (cachedRow && Number(cachedRow.expires_at) > nowSeconds()) {
     const parsed = parseJson(cachedRow.data_json, []);
     const cachedUsers = Array.isArray(parsed) ? parsed : [];
-    setLocalCache(cacheKey, cachedUsers);
+    setLocalCache(runtime, cacheKey, cachedUsers);
     return new Response(JSON.stringify(cachedUsers), { status: 200, headers });
   }
 
-  const response = await fetchWithRateLimit(`https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`);
+  const response = await fetchWithRateLimit(
+    runtime,
+    `https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`
+  );
   if (!response.ok) {
     return new Response("Failed to fetch clan data", { status: 502, headers });
   }
@@ -468,10 +479,11 @@ async function fetchClanUsernames(clanName, headers) {
   const ownerID = clanData?.data?.Owner;
   const currentUserIDs = [ownerID, ...members.map((member) => member.UserID)].filter(Number.isFinite);
 
-  const resolvedUsers = await resolveUsernames(currentUserIDs);
+  const resolvedUsers = await resolveUsernames(runtime, currentUserIDs);
   const ttlExpiresAt = nowSeconds() + USERNAME_CACHE_TTL_SECONDS;
   try {
     await dbRun(
+      runtime,
       `INSERT INTO username_cache (clan_name, data_json, expires_at, updated_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(clan_name) DO UPDATE SET
@@ -483,18 +495,18 @@ async function fetchClanUsernames(clanName, headers) {
   } catch (error) {
     console.warn(`Failed username cache write for ${clanName}:`, error);
   }
-  setLocalCache(cacheKey, resolvedUsers);
+  setLocalCache(runtime, cacheKey, resolvedUsers);
 
   return new Response(JSON.stringify(resolvedUsers), { status: 200, headers });
 }
 
-async function resolveUsernames(userIDs) {
+async function resolveUsernames(runtime, userIDs) {
   if (userIDs.length === 0) {
     return [];
   }
 
   try {
-    const response = await fetchWithRateLimit("https://users.roblox.com/v1/users", {
+    const response = await fetchWithRateLimit(runtime, "https://users.roblox.com/v1/users", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -521,28 +533,42 @@ async function resolveUsernames(userIDs) {
   }
 }
 
-async function fetchActiveBattle() {
-  const response = await fetchWithRateLimit("https://ps99.biggamesapi.io/api/activeClanBattle");
+async function fetchActiveBattle(runtime) {
+  const response = await fetchWithRateLimit(runtime, "https://ps99.biggamesapi.io/api/activeClanBattle");
+  if (!response.ok) {
+    throw new Error(`Active battle request failed with ${response.status}`);
+  }
   const responseData = await response.json();
 
-  activeBattle = responseData?.data?.configName || "";
-  activeBattleEndTime = responseData?.data?.configData?.FinishTime || 0;
+  const battleId = responseData?.data?.configName || "";
+  const endTime = responseData?.data?.configData?.FinishTime || 0;
 
-  if (!activeBattle) {
+  if (!battleId) {
     throw new Error("Missing active battle configName");
   }
+  return { battleId, endTime };
 }
 
-async function fetchTopClans() {
+async function fetchTopClans(runtime) {
   const response = await fetchWithRateLimit(
+    runtime,
     "https://ps99.biggamesapi.io/api/clans?page=1&pageSize=35&sort=Points&sortOrder=desc"
   );
+  if (!response.ok) {
+    throw new Error(`Top clans request failed with ${response.status}`);
+  }
   const payload = await response.json();
   return payload?.data || [];
 }
 
-async function fetchClanData(clanName) {
-  const response = await fetchWithRateLimit(`https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`);
+async function fetchClanData(runtime, clanName) {
+  const response = await fetchWithRateLimit(
+    runtime,
+    `https://ps99.biggamesapi.io/api/clan/${encodeURIComponent(clanName)}`
+  );
+  if (!response.ok) {
+    throw new Error(`Clan ${clanName} request failed with ${response.status}`);
+  }
   return response.json();
 }
 
@@ -560,17 +586,18 @@ function buildPointsSignature(pointsData) {
   return `${totalPoints}|${place}|${normalized}`;
 }
 
-async function updatePoints(clanName, pointsData) {
+async function updatePoints(runtime, battleId, clanName, pointsData) {
   const timestamp = new Date().toISOString();
   const signature = buildPointsSignature(pointsData);
 
   const latestSnapshot = await dbFirst(
+    runtime,
     `SELECT data_json, signature
      FROM clan_snapshots
      WHERE battle_id = ? AND clan_name = ?
      ORDER BY id DESC
      LIMIT 1`,
-    [activeBattle, clanName]
+    [battleId, clanName]
   );
 
   if (latestSnapshot && String(latestSnapshot.signature || "") === signature) {
@@ -580,15 +607,16 @@ async function updatePoints(clanName, pointsData) {
   const previousData = latestSnapshot ? parseJson(latestSnapshot.data_json, null) : null;
 
   await dbRun(
+    runtime,
     `INSERT INTO clan_snapshots (battle_id, clan_name, timestamp, data_json, signature)
      VALUES (?, ?, ?, ?, ?)`,
-    [activeBattle, clanName, timestamp, JSON.stringify(pointsData), signature]
+    [battleId, clanName, timestamp, JSON.stringify(pointsData), signature]
   );
 
-  await trackChanges(clanName, previousData, pointsData, timestamp);
+  await trackChanges(runtime, battleId, clanName, previousData, pointsData, timestamp);
 }
 
-async function trackChanges(clanName, previousData, nextData, timestamp) {
+async function trackChanges(runtime, battleId, clanName, previousData, nextData, timestamp) {
   if (!previousData || !nextData) {
     return;
   }
@@ -615,44 +643,55 @@ async function trackChanges(clanName, previousData, nextData, timestamp) {
 
   for (const change of changes) {
     await dbRun(
+      runtime,
       `INSERT INTO clan_changes (battle_id, clan_name, change_type, user_id, timestamp)
        VALUES (?, ?, ?, ?, ?)`,
-      [activeBattle, clanName, change.type, Number(change.UserID), change.timestamp]
+      [battleId, clanName, change.type, Number(change.UserID), change.timestamp]
     );
   }
 }
 
-async function cleanupOldData() {
+async function cleanupOldData(runtime, battleId, endTime) {
   const now = nowSeconds();
-  if (!activeBattleEndTime || now < activeBattleEndTime + 86400) {
+  if (!endTime || now < endTime + 86400) {
     return false;
   }
 
-  const trackedClans = await getTrackedClansList(activeBattle);
-  if (trackedClans.length === 0) {
-    return false;
+  const existingData = await dbFirst(
+    runtime,
+    `SELECT
+       EXISTS(SELECT 1 FROM clan_snapshots WHERE battle_id = ? LIMIT 1) AS has_snapshots,
+       EXISTS(SELECT 1 FROM clan_changes WHERE battle_id = ? LIMIT 1) AS has_changes,
+       EXISTS(SELECT 1 FROM tracked_clans WHERE battle_id = ? LIMIT 1) AS has_tracked,
+       EXISTS(SELECT 1 FROM battle_state WHERE battle_id = ? LIMIT 1) AS has_state`,
+    [battleId, battleId, battleId, battleId]
+  );
+  const hasStoredData = existingData && Object.values(existingData).some((value) => Number(value) > 0);
+  if (hasStoredData) {
+    await dbRun(runtime, "DELETE FROM clan_snapshots WHERE battle_id = ?", [battleId]);
+    await dbRun(runtime, "DELETE FROM clan_changes WHERE battle_id = ?", [battleId]);
+    await dbRun(runtime, "DELETE FROM tracked_clans WHERE battle_id = ?", [battleId]);
+    await dbRun(runtime, "DELETE FROM battle_state WHERE battle_id = ?", [battleId]);
   }
 
-  await dbRun("DELETE FROM clan_snapshots WHERE battle_id = ?", [activeBattle]);
-  await dbRun("DELETE FROM clan_changes WHERE battle_id = ?", [activeBattle]);
-  await dbRun("DELETE FROM tracked_clans WHERE battle_id = ?", [activeBattle]);
-  await dbRun("DELETE FROM battle_state WHERE battle_id = ?", [activeBattle]);
+  // Returning true even after a previous cleanup prevents the scheduler from
+  // repopulating an already-expired battle on every other invocation.
   return true;
 }
 
-async function fetchAndUpdatePoints() {
-  await fetchActiveBattle();
-  const cleaned = await cleanupOldData();
+async function fetchAndUpdatePoints(runtime) {
+  const { battleId, endTime } = await fetchActiveBattle(runtime);
+  const cleaned = await cleanupOldData(runtime, battleId, endTime);
   if (cleaned) {
     return;
   }
 
-  const topClans = await fetchTopClans();
+  const topClans = await fetchTopClans(runtime);
   const uniqueClans = new Set(topClans.map((clan) => String(clan.Name || "").toLowerCase()).filter(Boolean));
   PINNED_CLANS.forEach((clan) => uniqueClans.add(clan.toLowerCase()));
   const clansToTrack = [...uniqueClans];
 
-  const cursorValue = await getBattleCursor(activeBattle);
+  const cursorValue = await getBattleCursor(runtime, battleId);
   let cursor = Number.isFinite(cursorValue) ? cursorValue : 0;
   if (!Number.isFinite(cursor) || cursor < 0 || cursor >= clansToTrack.length) {
     cursor = 0;
@@ -666,12 +705,12 @@ async function fetchAndUpdatePoints() {
 
   for (const clanName of clansBatch) {
     try {
-      const clanData = await fetchClanData(clanName);
-      const pointsData = clanData?.data?.Battles?.[activeBattle]?.PointContributions
-        ? clanData.data.Battles[activeBattle]
+      const clanData = await fetchClanData(runtime, clanName);
+      const pointsData = clanData?.data?.Battles?.[battleId]?.PointContributions
+        ? clanData.data.Battles[battleId]
         : null;
       if (pointsData) {
-        await updatePoints(clanName, pointsData);
+        await updatePoints(runtime, battleId, clanName, pointsData);
       }
     } catch (error) {
       console.error(`Failed clan update for ${clanName}:`, error);
@@ -680,16 +719,17 @@ async function fetchAndUpdatePoints() {
 
   const nextCursor = cursor + clansBatch.length >= clansToTrack.length ? 0 : cursor + clansBatch.length;
   if (!Number.isFinite(cursorValue) || nextCursor !== cursorValue) {
-    await setBattleCursor(activeBattle, nextCursor, activeBattleEndTime);
+    await setBattleCursor(runtime, battleId, nextCursor, endTime);
   }
 
-  await ensureTrackedClans(activeBattle, clansToTrack);
+  await syncTrackedClans(runtime, battleId, clansToTrack);
 }
 
-async function readClanSnapshots(battleId, clanName, beforeMs) {
+async function readClanSnapshots(runtime, battleId, clanName, beforeMs) {
   let rows = [];
   if (beforeMs !== null) {
     rows = await dbAll(
+      runtime,
       `SELECT timestamp, data_json
        FROM clan_snapshots
        WHERE battle_id = ? AND clan_name = ? AND timestamp < ?
@@ -698,6 +738,7 @@ async function readClanSnapshots(battleId, clanName, beforeMs) {
     );
   } else {
     rows = await dbAll(
+      runtime,
       `SELECT timestamp, data_json
        FROM clan_snapshots
        WHERE battle_id = ? AND clan_name = ?
@@ -721,8 +762,9 @@ async function readClanSnapshots(battleId, clanName, beforeMs) {
   return history;
 }
 
-async function getBattleCursor(battleId) {
+async function getBattleCursor(runtime, battleId) {
   const row = await dbFirst(
+    runtime,
     "SELECT update_cursor FROM battle_state WHERE battle_id = ? LIMIT 1",
     [battleId]
   );
@@ -733,8 +775,9 @@ async function getBattleCursor(battleId) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-async function setBattleCursor(battleId, updateCursor, endTime) {
+async function setBattleCursor(runtime, battleId, updateCursor, endTime) {
   await dbRun(
+    runtime,
     `INSERT INTO battle_state (battle_id, update_cursor, end_time, updated_at)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(battle_id) DO UPDATE SET
@@ -745,8 +788,9 @@ async function setBattleCursor(battleId, updateCursor, endTime) {
   );
 }
 
-async function getTrackedClansList(battleId) {
+async function getTrackedClansList(runtime, battleId) {
   const rows = await dbAll(
+    runtime,
     `SELECT clan_name
      FROM tracked_clans
      WHERE battle_id = ?
@@ -758,14 +802,29 @@ async function getTrackedClansList(battleId) {
     .filter(Boolean);
 }
 
-async function ensureTrackedClans(battleId, clansToTrack) {
+async function syncTrackedClans(runtime, battleId, clansToTrack) {
   const existingRows = await dbAll(
+    runtime,
     "SELECT clan_name FROM tracked_clans WHERE battle_id = ?",
     [battleId]
   );
   const existingSet = new Set(
     existingRows.map((row) => String(row.clan_name || "").toLowerCase()).filter(Boolean)
   );
+  const desiredSet = new Set(
+    clansToTrack.map((clanName) => String(clanName || "").toLowerCase()).filter(Boolean)
+  );
+
+  for (const clanName of existingSet) {
+    if (desiredSet.has(clanName)) {
+      continue;
+    }
+    await dbRun(
+      runtime,
+      "DELETE FROM tracked_clans WHERE battle_id = ? AND clan_name = ?",
+      [battleId, clanName]
+    );
+  }
 
   const now = nowSeconds();
   for (const clanName of clansToTrack) {
@@ -775,6 +834,7 @@ async function ensureTrackedClans(battleId, clansToTrack) {
     }
 
     await dbRun(
+      runtime,
       "INSERT INTO tracked_clans (battle_id, clan_name, added_at) VALUES (?, ?, ?)",
       [battleId, normalized, now]
     );
@@ -782,22 +842,23 @@ async function ensureTrackedClans(battleId, clansToTrack) {
   }
 }
 
-async function getTrackedClansSet() {
-  const trackedClans = await getTrackedClansList(activeBattle);
+async function getTrackedClansSet(runtime, battleId) {
+  const trackedClans = await getTrackedClansList(runtime, battleId);
   return new Set(trackedClans);
 }
 
-async function readClanChanges(clanName, trackedSet) {
+async function readClanChanges(runtime, battleId, clanName, trackedSet) {
   if (!trackedSet.has(clanName)) {
     return [];
   }
 
   const rows = await dbAll(
+    runtime,
     `SELECT change_type, user_id, timestamp
      FROM clan_changes
      WHERE battle_id = ? AND clan_name = ?
      ORDER BY id ASC`,
-    [activeBattle, clanName]
+    [battleId, clanName]
   );
 
   return rows.map((row) => ({
@@ -812,21 +873,21 @@ function countRecentChanges(changes) {
   return (changes || []).filter((change) => new Date(change.timestamp).getTime() >= cutoff).length;
 }
 
-async function getChanges(clanName) {
-  const trackedSet = await getTrackedClansSet();
-  const clanChanges = await readClanChanges(clanName, trackedSet);
+async function getChanges(runtime, battleId, clanName) {
+  const trackedSet = await getTrackedClansSet(runtime, battleId);
+  const clanChanges = await readClanChanges(runtime, battleId, clanName, trackedSet);
   return { [clanName]: clanChanges };
 }
 
-async function getChangesBatch(clanNames) {
-  const trackedSet = await getTrackedClansSet();
+async function getChangesBatch(runtime, battleId, clanNames) {
+  const trackedSet = await getTrackedClansSet(runtime, battleId);
   const entries = await Promise.all(
-    clanNames.map(async (clanName) => [clanName, await readClanChanges(clanName, trackedSet)])
+    clanNames.map(async (clanName) => [clanName, await readClanChanges(runtime, battleId, clanName, trackedSet)])
   );
   return Object.fromEntries(entries);
 }
 
-async function getChangesCounts(clanNames) {
-  const changesByClan = await getChangesBatch(clanNames);
+async function getChangesCounts(runtime, battleId, clanNames) {
+  const changesByClan = await getChangesBatch(runtime, battleId, clanNames);
   return Object.fromEntries(clanNames.map((clanName) => [clanName, countRecentChanges(changesByClan[clanName])]));
 }
