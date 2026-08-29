@@ -214,8 +214,7 @@ async function renderHome(nonce) {
           <div class="subtext">
             <p>
               Want your clan pinned?
-              <a href="https://discord.gg/wPhaR58pDp" target="_blank" rel="noopener noreferrer">Join the Discord</a>
-              and message andreyondemand.
+              <a href="https://discord.gg/wPhaR58pDp" target="_blank" rel="noopener noreferrer">Join the Discord</a>.
             </p>
           </div>
         </div>

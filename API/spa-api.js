@@ -272,7 +272,7 @@ function handleMessageRequest(headers) {
   const messageJson = {
     message: "psclans isn't shutting down! More info in the Discord",
     color: "darkblue",
-    visible: true,
+    visible: false,
     status: "success",
   };
 
