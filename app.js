@@ -9,6 +9,7 @@ const ASSET_BASE = "./assets/images";
 const PLAYER_ICON_FALLBACK = `${ASSET_BASE}/error.png`;
 const CACHE_PREFIX = "psc_http_cache_v2_";
 const WORKER_MIN_INTERVAL_MS = 180;
+const FETCH_TIMEOUT_MS = 12000;
 const CLAN_HISTORY_PAGE_LIMIT = 2000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_TTL_MS = {
@@ -354,7 +355,7 @@ async function renderClans(nonce) {
         <td data-label="Place">#${index + 1}${medal ? ` <img class="icon" src="${medal}" alt="medal" />` : ""}</td>
         <td data-label="Clan">
           <div style="display:flex;align-items:center;gap:10px;">
-            <img src="${iconUrl}" width="50" height="50" alt="${escapeHtml(clan.Name)}" />
+            <img class="clan-list-icon" width="50" height="50" alt="${escapeHtml(clan.Name)}" />
             <span style="font-size:24px;line-height:50px;">${escapeHtml(clan.Name)}</span>
           </div>
         </td>
@@ -362,6 +363,7 @@ async function renderClans(nonce) {
         <td data-label="Points">${formatNumber(clan.Points)}</td>
         <td data-label="Members">${formatNumber((clan.Members || 0) + 1)}</td>
       `;
+      setImageSource(row.querySelector(".clan-list-icon"), iconUrl);
 
       tbody.appendChild(row);
 
@@ -721,11 +723,12 @@ async function renderPlayers(params, nonce) {
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML = `
-        <img src="${avatar}" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
+        <img class="player-avatar" alt="${escapeHtml(username)}" />
         <h4 class="player-place">#${idx + 1}</h4>
         <p class="player-name">${escapeHtml(username)}</p>
         <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(entry.Points)} Points</p>
       `;
+      setImageSource(card.querySelector(".player-avatar"), avatar);
       grid.appendChild(card);
       cardEntries.push({
         card,
@@ -796,12 +799,13 @@ async function renderEnchants(nonce) {
       const card = document.createElement("div");
       card.className = "card";
       card.innerHTML = `
-        <img src="${state.assetIconCache.get(iconId) || `${ASSET_BASE}/error.png`}" alt="${escapeHtml(title)}" />
+        <img class="enchant-icon" alt="${escapeHtml(title)}" />
         <p class="configName">${escapeHtml(title)}</p>
         <p class="diminishPowerThreshold">Maximum power: ${round2(threshold)}</p>
         <p>Power per each tier ${maxTier + 1} book: ${round2(power)}</p>
         <p>Total tier ${maxTier + 1} books possible at the same time: ${round2(totalBooks)}</p>
       `;
+      setImageSource(card.querySelector(".enchant-icon"), state.assetIconCache.get(iconId));
 
       cards.push({
         card,
@@ -856,7 +860,7 @@ function createClanCard(clanName, rank, iconUrl) {
   const card = document.createElement("a");
   card.href = `#/clan?clan=${encodeURIComponent(clanName)}`;
   card.className = "nav-card";
-  card.style.backgroundImage = `url('${iconUrl || `${ASSET_BASE}/error.png`}')`;
+  card.style.backgroundImage = `url(${JSON.stringify(normalizeImageUrl(iconUrl))})`;
 
   const content = document.createElement("div");
   content.className = "card-content";
@@ -1010,13 +1014,14 @@ async function populateMemberChangesCarousel(changes, clanLower, nonce, onProgre
     const entry = document.createElement("div");
     entry.className = "member-change-entry";
     entry.innerHTML = `
-      <img src="${avatar}" class="user-image" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
+      <img class="user-image" alt="${escapeHtml(username)}" />
       <div class="member-info">
         <p><strong>Username:</strong> ${escapeHtml(username)}</p>
         <p><strong>Status:</strong> ${escapeHtml(change.type || "unknown")}</p>
         <p><small>Timestamp: ${formatTimestamp(change.timestamp)}</small></p>
       </div>
     `;
+    setImageSource(entry.querySelector(".user-image"), avatar);
     carousel.appendChild(entry);
   });
 }
@@ -1076,13 +1081,14 @@ function renderMembersGrid(rows, usernameMap, timelineMap, clanData, clanLower, 
     }
 
     card.innerHTML = `
-      <img src="${avatar}" alt="${escapeHtml(username)}" onerror="this.onerror=null;this.src='${PLAYER_ICON_FALLBACK}';" />
+      <img class="player-avatar" alt="${escapeHtml(username)}" />
       <h4 class="player-place">#${place}</h4>
       <p class="player-name">${escapeHtml(username)}</p>
       <p class="points"><img class="icon" src="${ASSET_BASE}/gold_star_1_outline.png" alt="points" /> ${formatNumber(member.Points)} Points</p>
       <p class="LastHour">Last hour: ${formatGainValue(gainedLastHour)}</p>
       <p class="LastDay">Last day: ${formatGainValue(gained)}</p>
     `;
+    setImageSource(card.querySelector(".player-avatar"), avatar);
 
     grid.appendChild(card);
   });
@@ -1451,7 +1457,13 @@ async function openPopupForMember(userId, username, clanData, clanLower, members
   state.popupHistoryLoading = false;
 
   document.getElementById("popup-username").textContent = username;
-  document.getElementById("popup-userid").innerHTML = `<a href="https://www.roblox.com/users/${userId}/profile" target="_blank" rel="noopener noreferrer">${userId}</a>`;
+  const popupUserIdEl = document.getElementById("popup-userid");
+  const profileLink = document.createElement("a");
+  profileLink.href = `https://www.roblox.com/users/${encodeURIComponent(String(userId))}/profile`;
+  profileLink.target = "_blank";
+  profileLink.rel = "noopener noreferrer";
+  profileLink.textContent = String(userId);
+  popupUserIdEl.replaceChildren(profileLink);
 
   const member = members.find((entry) => entry.UserID === userId);
   document.getElementById("popup-joined").textContent = member?.JoinTime
@@ -2032,11 +2044,17 @@ async function resolveAssetIconsBatch(assetIds, options = {}) {
     ).catch(() => null);
 
     const byId = new Map(
-      (payload?.data || []).map((entry) => [String(entry.targetId), entry.imageUrl || `${BIG_IMAGE_API}/${entry.targetId}`])
+      (payload?.data || []).map((entry) => [
+        String(entry.targetId),
+        normalizeImageUrl(entry.imageUrl, `${BIG_IMAGE_API}/${encodeURIComponent(entry.targetId)}`),
+      ])
     );
 
     chunk.forEach((id) => {
-      state.assetIconCache.set(id, byId.get(String(id)) || `${BIG_IMAGE_API}/${encodeURIComponent(id)}`);
+      state.assetIconCache.set(
+        id,
+        byId.get(String(id)) || normalizeImageUrl(`${BIG_IMAGE_API}/${encodeURIComponent(id)}`)
+      );
       if (onProgress) {
         onProgress(labelById(id));
       }
@@ -2060,7 +2078,9 @@ async function resolveUserAvatarsBatch(userIds, options = {}) {
       `${ROPROXY_THUMBS}/users/avatar-headshot?userIds=${encodeURIComponent(query)}&size=180x180&format=Png&isCircular=false`
     ).catch(() => null);
 
-    const byId = new Map((payload?.data || []).map((entry) => [entry.targetId, entry.imageUrl || PLAYER_ICON_FALLBACK]));
+    const byId = new Map(
+      (payload?.data || []).map((entry) => [entry.targetId, normalizeImageUrl(entry.imageUrl)])
+    );
     chunk.forEach((id) => {
       state.userAvatarCache.set(id, byId.get(id) || PLAYER_ICON_FALLBACK);
       if (onProgress) {
@@ -2077,7 +2097,14 @@ async function fetchJSON(url, options, config = {}) {
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
-      const response = await fetch(url, options);
+      const requestOptions = { ...(options || {}) };
+      if (typeof window.AbortSignal?.timeout === "function") {
+        const timeoutSignal = window.AbortSignal.timeout(FETCH_TIMEOUT_MS);
+        requestOptions.signal = requestOptions.signal && typeof window.AbortSignal.any === "function"
+          ? window.AbortSignal.any([requestOptions.signal, timeoutSignal])
+          : requestOptions.signal || timeoutSignal;
+      }
+      const response = await fetch(url, requestOptions);
       if (response.ok) {
         return await response.json();
       }
@@ -2272,7 +2299,7 @@ function formatTimestamp(timestamp) {
 function formatNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) {
-    return String(value ?? "N/A");
+    return "N/A";
   }
   return number.toLocaleString("en-US");
 }
@@ -2288,4 +2315,29 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function normalizeImageUrl(value, fallback = PLAYER_ICON_FALLBACK) {
+  const fallbackUrl = new URL(fallback, window.location.href);
+  try {
+    const url = new URL(String(value || ""), window.location.href);
+    if (url.origin === window.location.origin || url.protocol === "https:") {
+      return url.href;
+    }
+  } catch {}
+  return fallbackUrl.href;
+}
+
+function setImageSource(image, value, fallback = PLAYER_ICON_FALLBACK) {
+  if (!(image instanceof HTMLImageElement)) {
+    return;
+  }
+
+  const fallbackUrl = normalizeImageUrl(fallback);
+  image.addEventListener("error", () => {
+    if (image.src !== fallbackUrl) {
+      image.src = fallbackUrl;
+    }
+  }, { once: true });
+  image.src = normalizeImageUrl(value, fallbackUrl);
 }

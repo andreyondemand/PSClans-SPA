@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'self'; connect-src 'self' https://ps99.biggamesapi.io https://psclans-spa.cloudflare-6apm0.workers.dev https://users.roproxy.com https://thumbnails.roproxy.com; form-action 'self'; img-src 'self' data: https:; object-src 'none'; script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests"
+    />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>Pet Simulator Clans</title>
     <meta content="Pet Simulator Clans" property="og:title" />
     <meta
@@ -21,10 +26,26 @@
       href="./assets/images/clans.webp"
     />
     <link rel="stylesheet" href="./styles.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@0.1.1/dist/chartjs-adapter-moment.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@0.7.7/dist/chartjs-plugin-zoom.min.js"></script>
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"
+      integrity="sha384-hjtEWSfxVipaKknyGUhJZbhSbbepyHXBQlM78R56XnihJKl1YPeepRjUWc3aMMHH"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/moment@2.30.1/moment.min.js"
+      integrity="sha384-USAC6hjPkAFseeCu8uwen4DQN6SWnkiILAVc0YpMn9zQWGI7ClWd2HcCoPGWWxT1"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@0.1.1/dist/chartjs-adapter-moment.min.js"
+      integrity="sha384-6UnKNJH54wbUPT5gmb/LwfUhVC1HOY0rhT8pzkd8HckDGBPuCw6dc4NhIgEf5Tjo"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@0.7.7/dist/chartjs-plugin-zoom.min.js"
+      integrity="sha384-/8Dlz/HHZKwUuh9HZDV80gC+9mz8z95Iw8Np4VzOrudbL0KWUaxO+r1ZUItIIrAm"
+      crossorigin="anonymous"
+    ></script>
   </head>
   <body>
     <header class="topbar">
