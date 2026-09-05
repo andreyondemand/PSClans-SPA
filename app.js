@@ -25,6 +25,10 @@ const USERNAME_BATCH_SIZE = 100;
 
 const appEl = document.getElementById("app");
 const topBarEl = document.getElementById("topBar");
+const serviceBannerEl = document.getElementById("serviceBanner");
+const failedRequests = new Set();
+let healthWarning = "";
+let healthCheckPending = false;
 const navLinks = Array.from(document.querySelectorAll("#main-nav a"));
 const popupEl = document.getElementById("graph-popup");
 const closePopupBtn = document.getElementById("close-popup");
@@ -81,6 +85,7 @@ window.addEventListener("hashchange", renderRoute);
 init();
 
 async function init() {
+  startServiceMonitoring();
   if (!window.location.hash) {
     window.location.hash = "#/";
   }
@@ -89,6 +94,57 @@ async function init() {
   state.activeBattleEndTime = activeBattleInfo.endTime;
   await loadAnnouncement();
   renderRoute();
+}
+
+function renderServiceBanner() {
+  const messages = [];
+  if (navigator.onLine === false) {
+    messages.push("You’re offline. Some information may be unavailable or out of date.");
+  } else {
+    if (healthWarning) messages.push(healthWarning);
+    if (failedRequests.size) {
+      messages.push("Some data could not be loaded. Displayed information may be incomplete or out of date. Try refreshing the page.");
+    }
+  }
+  serviceBannerEl.textContent = messages.join(" ");
+  serviceBannerEl.classList.toggle("hidden", messages.length === 0);
+}
+
+async function checkServiceHealth() {
+  if (healthCheckPending || document.hidden || navigator.onLine === false) return;
+  healthCheckPending = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${WORKER_API}/health`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const health = await response.json();
+    healthWarning = response.ok && health?.status === "ok"
+      ? ""
+      : "Clan tracking is experiencing problems. Updates may be delayed.";
+  } catch {
+    healthWarning = "Service health could not be checked. Clan tracking may be unavailable.";
+  } finally {
+    clearTimeout(timeout);
+    healthCheckPending = false;
+    renderServiceBanner();
+  }
+}
+
+function startServiceMonitoring() {
+  renderServiceBanner();
+  void checkServiceHealth();
+  setInterval(checkServiceHealth, 60 * 1000);
+  window.addEventListener("offline", renderServiceBanner);
+  window.addEventListener("online", () => {
+    renderServiceBanner();
+    void checkServiceHealth();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void checkServiceHealth();
+  });
 }
 
 function parseHashRoute() {
@@ -198,7 +254,7 @@ async function renderHome(nonce) {
     </header>
 
     <div class="search-container">
-      <input type="text" id="searchInput" placeholder="Enter clan name..." />
+      <input type="text" id="searchInput" aria-label="Clan name" placeholder="Enter clan name..." />
       <button id="searchButton">Search</button>
     </div>
 
@@ -296,7 +352,7 @@ async function renderClans(nonce) {
           <h3 id="desc">The top tracked clans have advanced member point history</h3>
         </div>
         <div class="search-container">
-          <input type="text" id="searchInput" placeholder="Enter clan name..." />
+          <input type="text" id="searchInput" aria-label="Clan name" placeholder="Enter clan name..." />
           <button id="searchButton">Search</button>
         </div>
       </div>
@@ -406,7 +462,7 @@ async function renderClan(params, nonce) {
         </div>
       </header>
       <div class="search-container">
-        <input type="text" id="searchInput" placeholder="Enter clan name..." />
+        <input type="text" id="searchInput" aria-label="Clan name" placeholder="Enter clan name..." />
         <button id="searchButton">Search</button>
       </div>
     `;
@@ -2106,7 +2162,10 @@ async function fetchJSON(url, options, config = {}) {
       }
       const response = await fetch(url, requestOptions);
       if (response.ok) {
-        return await response.json();
+        const payload = await response.json();
+        failedRequests.delete(url);
+        renderServiceBanner();
+        return payload;
       }
       lastError = new Error(`${response.status} ${response.statusText}`);
       if (!retryStatuses.includes(response.status) || attempt === maxRetries) {
@@ -2115,6 +2174,11 @@ async function fetchJSON(url, options, config = {}) {
     } catch (error) {
       lastError = error;
       if (attempt === maxRetries) {
+        // Missing records and invalid input are page errors, not service outages.
+        if (!/^(400|404) /.test(String(error.message))) {
+          failedRequests.add(url);
+          renderServiceBanner();
+        }
         throw error;
       }
     }

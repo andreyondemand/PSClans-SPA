@@ -30,6 +30,16 @@ body {
   display: none !important;
 }
 
+.service-banner {
+  background: #493508;
+  color: #fff0c2;
+  border-bottom: 1px solid #987323;
+  padding: 12px 20px;
+  text-align: center;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .topbar {
   background-color: #0066ff;
   display: flex;
@@ -46,6 +56,11 @@ body {
 
 .brand-link {
   flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .brand-link img {
@@ -662,6 +677,10 @@ select {
 }
 
 @media (max-width: 700px) {
+  .topbar nav {
+    justify-content: flex-start;
+  }
+
   .topbar nav a {
     padding: 6px 8px;
   }
