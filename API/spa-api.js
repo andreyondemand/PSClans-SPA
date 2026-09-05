@@ -7,7 +7,8 @@ const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 const DEFAULT_FETCH_BUDGET_MS = 25000;
 const MAX_RETRY_AFTER_MS = 10000;
 const LOCAL_CACHE_TTL_MS = 10 * 60 * 1000;
-const MAX_CLAN_FETCHES_PER_RUN = 30;
+const MAX_CLAN_FETCHES_PER_RUN = 2;
+const SCHEDULED_WORK_BUDGET_MS = 40000;
 const MAX_CHANGES_BATCH_CLANS = 30;
 const MAX_CHANGES_QUERY_LENGTH = 1024;
 const MAX_USERNAMES_BATCH_IDS = 200;
@@ -84,8 +85,9 @@ function createRuntime(env, options = {}) {
     rateLimiter: env?.API_RATE_LIMITER,
     nextAllowedRequestTime: 0,
     localCache: new Map(),
+    scheduledDeadline: scheduled ? Date.now() + SCHEDULED_WORK_BUDGET_MS : null,
     fetchPolicy: scheduled
-      ? { maxRetries: 4, timeoutMs: 10000, budgetMs: 60000 }
+      ? { maxRetries: 1, timeoutMs: 5000, budgetMs: 8000 }
       : { maxRetries: 2, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS, budgetMs: DEFAULT_FETCH_BUDGET_MS },
   };
 }
@@ -837,69 +839,47 @@ function buildPointsSignature(pointsData) {
   return `${totalPoints}|${place}|${normalized}`;
 }
 
-async function updatePoints(runtime, battleId, clanName, pointsData) {
+async function updatePoints(runtime, battleId, clanName, pointsData, nextCursor, endTime) {
   const timestamp = new Date().toISOString();
   const signature = buildPointsSignature(pointsData);
-
-  const latestSnapshot = await dbFirst(
-    runtime,
-    `SELECT data_json, signature
-     FROM clan_snapshots
-     WHERE battle_id = ? AND clan_name = ?
-     ORDER BY id DESC
-     LIMIT 1`,
-    [battleId, clanName]
-  );
-
-  if (latestSnapshot && String(latestSnapshot.signature || "") === signature) {
-    return;
-  }
-
-  const previousData = latestSnapshot ? parseJson(latestSnapshot.data_json, null) : null;
-
-  await dbRun(
-    runtime,
-    `INSERT INTO clan_snapshots (battle_id, clan_name, timestamp, data_json, signature)
-     VALUES (?, ?, ?, ?, ?)`,
-    [battleId, clanName, timestamp, JSON.stringify(pointsData), signature]
-  );
-
-  await trackChanges(runtime, battleId, clanName, previousData, pointsData, timestamp);
-}
-
-async function trackChanges(runtime, battleId, clanName, previousData, nextData, timestamp) {
-  if (!previousData || !nextData) {
-    return;
-  }
-
-  const oldUsers = new Set(previousData?.PointContributions?.map((user) => user.UserID) || []);
-  const newUsers = new Set(nextData?.PointContributions?.map((user) => user.UserID) || []);
-
-  const changes = [
-    ...[...newUsers].filter((userId) => !oldUsers.has(userId)).map((userId) => ({
-      type: "joined",
-      UserID: userId,
-      timestamp,
-    })),
-    ...[...oldUsers].filter((userId) => !newUsers.has(userId)).map((userId) => ({
-      type: "left",
-      UserID: userId,
-      timestamp,
-    })),
-  ];
-
-  if (changes.length === 0) {
-    return;
-  }
-
-  for (const change of changes) {
-    await dbRun(
-      runtime,
-      `INSERT INTO clan_changes (battle_id, clan_name, change_type, user_id, timestamp)
-       VALUES (?, ?, ?, ?, ?)`,
-      [battleId, clanName, change.type, Number(change.UserID), change.timestamp]
-    );
-  }
+  const dataJson = JSON.stringify(pointsData);
+  const db = getDB(runtime);
+  // Do comparisons in D1 instead of reading/parsing old snapshots in the Worker.
+  // All three statements commit together, including progress on unchanged data.
+  await db.batch([
+    db.prepare(
+      `WITH previous AS (
+         SELECT data_json FROM clan_snapshots WHERE battle_id = ? AND clan_name = ?
+         ORDER BY timestamp DESC, id DESC LIMIT 1
+       ), old_members AS (
+         SELECT CAST(json_extract(member.value, '$.UserID') AS INTEGER) AS user_id
+         FROM previous, json_each(previous.data_json, '$.PointContributions') AS member
+       ), new_members AS (
+         SELECT CAST(json_extract(value, '$.UserID') AS INTEGER) AS user_id
+         FROM json_each(?, '$.PointContributions')
+       ), changes AS (
+         SELECT 'joined' AS change_type, user_id FROM (
+           SELECT user_id FROM new_members EXCEPT SELECT user_id FROM old_members
+         ) UNION ALL
+         SELECT 'left' AS change_type, user_id FROM (
+           SELECT user_id FROM old_members EXCEPT SELECT user_id FROM new_members
+         )
+       )
+       INSERT INTO clan_changes (battle_id, clan_name, change_type, user_id, timestamp)
+       SELECT ?, ?, change_type, user_id, ? FROM changes
+       WHERE EXISTS (SELECT 1 FROM previous)`
+    ).bind(battleId, clanName, dataJson, battleId, clanName, timestamp),
+    db.prepare(
+      `INSERT INTO clan_snapshots (battle_id, clan_name, timestamp, data_json, signature)
+       SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (
+         SELECT 1 FROM (
+           SELECT signature FROM clan_snapshots WHERE battle_id = ? AND clan_name = ?
+           ORDER BY timestamp DESC, id DESC LIMIT 1
+         ) WHERE signature = ?
+       )`
+    ).bind(battleId, clanName, timestamp, dataJson, signature, battleId, clanName, signature),
+    battleCursorStatement(runtime, battleId, nextCursor, endTime),
+  ]);
 }
 
 async function cleanupOldData(runtime, battleId, endTime) {
@@ -968,7 +948,7 @@ async function runScheduledUpdate(runtime) {
     const result = await fetchAndUpdatePoints(runtime);
     await tryRecordSchedulerStatus(runtime, result.state, {
       battleId: result.battleId,
-      succeeded: true,
+      succeeded: result.phase !== "maintenance",
     });
     logEvent("info", "Scheduled fetch completed", result);
   } catch (error) {
@@ -978,64 +958,71 @@ async function runScheduledUpdate(runtime) {
 }
 
 async function fetchAndUpdatePoints(runtime) {
-  await cleanupUsernameCache(runtime);
   const { battleId, endTime } = await fetchActiveBattle(runtime);
-  const cleaned = await cleanupOldData(runtime, battleId, endTime);
-  if (cleaned) {
+  if (await cleanupOldData(runtime, battleId, endTime)) {
     return { state: "idle", battleId, trackedClanCount: 0 };
   }
 
-  const topClans = await fetchTopClans(runtime);
-  const uniqueClans = new Set(topClans.map((clan) => String(clan.Name || "").toLowerCase()).filter(Boolean));
-  PINNED_CLANS.forEach((clan) => uniqueClans.add(clan.toLowerCase()));
-  const clansToTrack = [...uniqueClans];
-
-  const cursorValue = await getBattleCursor(runtime, battleId);
-  let cursor = Number.isFinite(cursorValue) ? cursorValue : 0;
-  if (!Number.isFinite(cursor) || cursor < 0 || cursor >= clansToTrack.length) {
-    cursor = 0;
+  const roster = await dbAll(runtime,
+    `SELECT tracked_clans.clan_name, battle_state.update_cursor
+     FROM tracked_clans LEFT JOIN battle_state USING (battle_id)
+     WHERE battle_id = ? ORDER BY added_at ASC, clan_name ASC`, [battleId]);
+  const clansToTrack = roster.map((row) => row.clan_name);
+  const cursor = roster[0]?.update_cursor ?? null;
+  // -1 marks a completed rotation. Refresh only between rotations, in a
+  // separate invocation, so changing leaderboard ranks cannot shift a cursor.
+  if (!Number.isInteger(cursor) || cursor < 0 || cursor >= clansToTrack.length) {
+    const topClans = await fetchTopClans(runtime);
+    const uniqueClans = new Set(topClans.map((clan) => String(clan.Name || "").toLowerCase()).filter(Boolean));
+    PINNED_CLANS.forEach((clan) => uniqueClans.add(clan.toLowerCase()));
+    await cleanupUsernameCache(runtime);
+    await syncTrackedClans(runtime, battleId, [...uniqueClans], endTime);
+    // Roster maintenance alone is not evidence of successful data collection.
+    return { state: "running", phase: "maintenance", battleId, trackedClanCount: uniqueClans.size };
   }
 
-  let clansBatch = clansToTrack.slice(cursor, cursor + MAX_CLAN_FETCHES_PER_RUN);
-  if (clansBatch.length === 0) {
-    cursor = 0;
-    clansBatch = clansToTrack.slice(0, MAX_CLAN_FETCHES_PER_RUN);
-  }
-
+  const clansBatch = clansToTrack.slice(cursor, cursor + MAX_CLAN_FETCHES_PER_RUN);
   let processedClanCount = 0;
   let failedClanCount = 0;
+  let attemptedClanCount = 0;
   for (const clanName of clansBatch) {
+    // Wall time guards against overlapping minute ticks; it is not CPU time.
+    // Actual CPU headroom must be verified in Cloudflare logs.
+    if (Date.now() >= runtime.scheduledDeadline) break;
+    const position = cursor + attemptedClanCount + 1;
+    const nextCursor = position >= clansToTrack.length ? -1 : position;
+    let pointsData = null;
     try {
       const clanData = await fetchClanData(runtime, clanName);
-      const pointsData = clanData?.data?.Battles?.[battleId]?.PointContributions
+      pointsData = Array.isArray(clanData?.data?.Battles?.[battleId]?.PointContributions)
         ? clanData.data.Battles[battleId]
         : null;
-      if (pointsData) {
-        await updatePoints(runtime, battleId, clanName, pointsData);
-        processedClanCount += 1;
-      }
     } catch (error) {
       failedClanCount += 1;
       logError("Failed clan update", error, { clanName, battleId });
     }
+    // Retry unavailable clans next rotation without starving the rest. Database
+    // failures escape: never checkpoint past an unsuccessful write.
+    if (pointsData) {
+      await updatePoints(runtime, battleId, clanName, pointsData, nextCursor, endTime);
+      processedClanCount += 1;
+    } else {
+      await setBattleCursor(runtime, battleId, nextCursor, endTime);
+    }
+    attemptedClanCount += 1;
   }
 
-  if (clansBatch.length > 0 && processedClanCount === 0) {
+  if (processedClanCount === 0) {
     throw new UpstreamRequestError("Scheduled clan batch produced no usable updates");
   }
-
-  const nextCursor = cursor + clansBatch.length >= clansToTrack.length ? 0 : cursor + clansBatch.length;
-  if (!Number.isFinite(cursorValue) || nextCursor !== cursorValue) {
-    await setBattleCursor(runtime, battleId, nextCursor, endTime);
-  }
-
-  await syncTrackedClans(runtime, battleId, clansToTrack);
   return {
     state: "ok",
+    phase: "clans",
     battleId,
     trackedClanCount: clansToTrack.length,
     processedClanCount,
     failedClanCount,
+    attemptedClanCount,
   };
 }
 
@@ -1079,30 +1066,20 @@ async function readClanSnapshots(runtime, battleId, clanName, beforeMs, rowLimit
   return history.reverse();
 }
 
-async function getBattleCursor(runtime, battleId) {
-  const row = await dbFirst(
-    runtime,
-    "SELECT update_cursor FROM battle_state WHERE battle_id = ? LIMIT 1",
-    [battleId]
-  );
-  if (!row) {
-    return null;
-  }
-  const parsed = Number.parseInt(String(row.update_cursor || ""), 10);
-  return Number.isFinite(parsed) ? parsed : null;
-}
 
 async function setBattleCursor(runtime, battleId, updateCursor, endTime) {
-  await dbRun(
-    runtime,
+  await battleCursorStatement(runtime, battleId, updateCursor, endTime).run();
+}
+
+function battleCursorStatement(runtime, battleId, updateCursor, endTime) {
+  return getDB(runtime).prepare(
     `INSERT INTO battle_state (battle_id, update_cursor, end_time, updated_at)
      VALUES (?, ?, ?, ?)
      ON CONFLICT(battle_id) DO UPDATE SET
        update_cursor = excluded.update_cursor,
        end_time = excluded.end_time,
-       updated_at = excluded.updated_at`,
-    [battleId, Number(updateCursor) || 0, Number(endTime) || 0, nowSeconds()]
-  );
+       updated_at = excluded.updated_at`
+  ).bind(battleId, updateCursor, Number(endTime) || 0, nowSeconds());
 }
 
 async function getTrackedClansList(runtime, battleId) {
@@ -1119,44 +1096,23 @@ async function getTrackedClansList(runtime, battleId) {
     .filter(Boolean);
 }
 
-async function syncTrackedClans(runtime, battleId, clansToTrack) {
-  const existingRows = await dbAll(
-    runtime,
-    "SELECT clan_name FROM tracked_clans WHERE battle_id = ?",
-    [battleId]
-  );
-  const existingSet = new Set(
-    existingRows.map((row) => String(row.clan_name || "").toLowerCase()).filter(Boolean)
-  );
-  const desiredSet = new Set(
-    clansToTrack.map((clanName) => String(clanName || "").toLowerCase()).filter(Boolean)
-  );
-
-  for (const clanName of existingSet) {
-    if (desiredSet.has(clanName)) {
-      continue;
-    }
-    await dbRun(
-      runtime,
-      "DELETE FROM tracked_clans WHERE battle_id = ? AND clan_name = ?",
-      [battleId, clanName]
-    );
-  }
-
-  const now = nowSeconds();
-  for (const clanName of clansToTrack) {
-    const normalized = String(clanName || "").toLowerCase();
-    if (!normalized || existingSet.has(normalized)) {
-      continue;
-    }
-
-    await dbRun(
-      runtime,
-      "INSERT INTO tracked_clans (battle_id, clan_name, added_at) VALUES (?, ?, ?)",
-      [battleId, normalized, now]
-    );
-    existingSet.add(normalized);
-  }
+async function syncTrackedClans(runtime, battleId, clansToTrack, endTime) {
+  const db = getDB(runtime);
+  const roster = JSON.stringify(clansToTrack);
+  // Reconcile in SQL instead of constructing one JS statement per clan. Keep
+  // existing added_at values so the processing order remains stable.
+  await db.batch([
+    db.prepare(
+      `DELETE FROM tracked_clans WHERE battle_id = ?
+       AND clan_name NOT IN (SELECT value FROM json_each(?))`
+    ).bind(battleId, roster),
+    db.prepare(
+      `INSERT INTO tracked_clans (battle_id, clan_name, added_at)
+       SELECT ?, value, ? FROM json_each(?) WHERE 1
+       ON CONFLICT(battle_id, clan_name) DO NOTHING`
+    ).bind(battleId, nowSeconds(), roster),
+    battleCursorStatement(runtime, battleId, 0, endTime),
+  ]);
 }
 
 async function getTrackedClansSet(runtime, battleId) {
