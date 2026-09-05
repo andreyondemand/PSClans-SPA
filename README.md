@@ -13,9 +13,9 @@ GitHub Pages and a Cloudflare Worker backed by D1.
 
 ## Local verification
 
-Node.js 24 is the documented development version; Node.js 22 or later is
-supported. Install exactly the dependency versions in `package-lock.json` and
-run the same checks used by CI:
+Node.js 24 is the documented development version; Node.js 22.13 or later is
+supported (the scheduler tests use built-in SQLite). Install exactly the
+dependency versions in `package-lock.json` and run the same checks used by CI:
 
 ```bash
 npm ci
@@ -84,7 +84,17 @@ Client-side behavior to reduce API volume:
 
 ## Data lifecycle and external dependencies
 
-- The Worker polls BIG Games every five minutes while a clan battle is active.
+- The Worker runs every minute and processes at most two clans per invocation.
+  The persisted clan order stays fixed for a full rotation. Leaderboard refresh
+  and username-cache cleanup use a separate invocation between rotations:
+  65 tracked clans take about 34 minutes to cover under normal conditions.
+- Each clan's snapshot, membership changes and next cursor commit together in
+  D1. An interrupted run resumes at the first uncommitted clan. Unavailable
+  upstream clans are skipped until the next rotation; a batch with no usable
+  updates reports an error. Maintenance alone does not refresh health success.
+- Scheduled upstream requests have shorter timeout/retry budgets, and a run
+  stops starting more clans after 40 seconds of elapsed time. This bounds work
+  during upstream trouble; it does not measure or guarantee CPU usage.
 - A tracked battle's D1 history is deleted 24 hours after its advertised finish
   time. During the gap before another active battle, `/clans` can legitimately
   return an empty array and clan history can return `404`.
@@ -98,7 +108,7 @@ Client-side behavior to reduce API volume:
 
 The Worker requires a Cloudflare D1 database bound as `D1_DB`. The checked-in
 `wrangler.jsonc` targets the existing production database, rate limiter, and
-five-minute cron.
+one-minute cron.
 
 > [!CAUTION]
 > The root Wrangler configuration points at production. Do not run `--remote`,

@@ -160,10 +160,13 @@ function createD1ForFailedScheduledRun(state) {
               if (query.includes("FROM scheduler_status")) {
                 return state.row;
               }
+              if (query.includes("FROM battle_state")) {
+                return { update_cursor: 0 };
+              }
               return null;
             },
             async all() {
-              return { results: [] };
+              return { results: ["a", "b", "c", "d", "e", "f"].map((clan_name) => ({ clan_name, update_cursor: 0 })) };
             },
             async run() {
               if (query.includes("INSERT INTO scheduler_status")) {
@@ -612,11 +615,11 @@ test("a scheduled batch with no usable clan updates records degraded health", as
     });
     await scheduledWork;
 
-    assert.equal(clanDetailCalls, 30);
+    assert.equal(clanDetailCalls, 2);
     assert.equal(state.row.state, "error");
     assert.equal(state.row.last_success_at, null);
-    assert.ok(state.writes.some(({ query }) => query.includes("DELETE FROM username_cache WHERE expires_at")));
-    assert.ok(!state.writes.some(({ query }) => query.includes("INSERT INTO battle_state")));
+    assert.ok(!state.writes.some(({ query }) => query.includes("DELETE FROM username_cache WHERE expires_at")));
+    assert.equal(state.writes.filter(({ query }) => query.includes("INSERT INTO battle_state")).length, 2);
 
     const healthResponse = await worker.fetch(
       new Request("https://worker.example/health"),

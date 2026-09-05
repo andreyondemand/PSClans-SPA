@@ -3,11 +3,11 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
-    "check": "node --check app.js && node --check API/spa-api.js && node --check API/spa-api.test.js && node scripts/check-static-security.js",
-    "test": "node API/spa-api.test.js",
+    "check": "node --check app.js && node --check API/spa-api.js && node --check API/spa-api.test.js && node --check API/scheduler.test.js && node scripts/check-static-security.js",
+    "test": "node API/spa-api.test.js && node API/scheduler.test.js",
     "worker:dev": "wrangler dev --test-scheduled",
     "worker:dry-run": "wrangler deploy --dry-run",
     "worker:deploy": "wrangler deploy",
