@@ -5,10 +5,8 @@ export const FALLBACK_PINNED_CLANS = [
   "EsPa",
   "KOR_",
   "GANG",
-  "K0ii",
   "fr3e",
   "AWZY",
-  "Gpz",
   "FFLH",
   "ACDR",
   "Sqiz",
@@ -31,16 +29,13 @@ export const FALLBACK_PINNED_CLANS = [
   "GST2",
   "CC4T",
   "H8M3",
-  "sh2p",
   "pr0x",
-  "VDC1",
   "Karl",
   "UN0",
   "FGZW",
   "XPQX",
   "taux",
-  "s7py",
-  "7hrw"
+  "s7py"
 ];
 
 export const FALLBACK_MESSAGE = {
