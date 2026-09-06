@@ -263,6 +263,90 @@ test("the public API accepts only GET and OPTIONS", async () => {
   assert.equal(optionsResponse.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
 });
 
+test("API requests record their website or direct API source", async () => {
+  const originalConsoleLog = console.log;
+  const logs = [];
+  const dataPoints = [];
+  console.log = (entry) => logs.push(entry);
+
+  const env = {
+    API_ANALYTICS: {
+      writeDataPoint(entry) {
+        dataPoints.push(entry);
+      },
+    },
+  };
+
+  try {
+    const websiteResponse = await worker.fetch(new Request("https://worker.example/message", {
+      headers: {
+        Origin: "https://andreyondemand.github.io",
+        "CF-IPCountry": "us",
+      },
+    }), env);
+    const apiResponse = await worker.fetch(new Request("https://worker.example/pinned"), env);
+
+    assert.equal(websiteResponse.status, 200);
+    assert.equal(apiResponse.status, 200);
+    assert.deepEqual(logs.map(({ durationMs, ...entry }) => entry), [
+      {
+        event: "api_request",
+        source: "website",
+        path: "/message",
+        origin: "https://andreyondemand.github.io",
+        country: "US",
+        method: "GET",
+        status: 200,
+      },
+      {
+        event: "api_request",
+        source: "api",
+        path: "/pinned",
+        origin: "none",
+        country: "unknown",
+        method: "GET",
+        status: 200,
+      },
+    ]);
+    assert.ok(logs.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0));
+    assert.deepEqual(dataPoints.map(({ doubles, ...entry }) => ({ ...entry, doubles: [doubles[0]] })), [
+      {
+        blobs: ["website", "/message", "https://andreyondemand.github.io", "US", "GET", "200"],
+        indexes: ["website"],
+        doubles: [1],
+      },
+      {
+        blobs: ["api", "/pinned", "none", "unknown", "GET", "200"],
+        indexes: ["api"],
+        doubles: [1],
+      },
+    ]);
+    assert.ok(dataPoints.every(({ doubles }) => Number.isFinite(doubles[1]) && doubles[1] >= 0));
+  } finally {
+    console.log = originalConsoleLog;
+  }
+});
+
+test("analytics failures do not fail API requests", async () => {
+  const originalConsoleLog = console.log;
+  const originalConsoleWarn = console.warn;
+  console.log = () => {};
+  console.warn = () => {};
+  try {
+    const response = await worker.fetch(new Request("https://worker.example/message"), {
+      API_ANALYTICS: {
+        writeDataPoint() {
+          throw new Error("analytics unavailable");
+        },
+      },
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    console.log = originalConsoleLog;
+    console.warn = originalConsoleWarn;
+  }
+});
+
 test("concurrent requests keep their D1 bindings isolated", async () => {
   const originalFetch = globalThis.fetch;
   let upstreamRequest = 0;

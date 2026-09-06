@@ -19,6 +19,7 @@ const MAX_CLAN_HISTORY_LIMIT = 2000;
 const DEFAULT_CLAN_HISTORY_LIMIT = MAX_CLAN_HISTORY_LIMIT;
 const SCHEDULER_FRESHNESS_SECONDS = 20 * 60;
 const RATE_LIMITED_PATHS = new Set(["/health", "/clans", "/changes", "/clan", "/usernames"]);
+const WEBSITE_ORIGINS = new Set(["https://andreyondemand.github.io"]);
 const PINNED_CLANS = [
   "DACE",
   "JKUS",
@@ -90,11 +91,15 @@ function createRuntime(env, options = {}) {
 export default {
   async fetch(request, env) {
     const runtime = createRuntime(env);
+    const startedAt = Date.now();
+    let response;
     try {
-      return await handleRequest(request, runtime);
+      response = await handleRequest(request, runtime);
     } catch (error) {
-      return createErrorResponse(error, createJsonHeaders(), "Unhandled request failure");
+      response = createErrorResponse(error, createJsonHeaders(), "Unhandled request failure");
     }
+    recordApiRequest(request, response, env, Date.now() - startedAt);
+    return response;
   },
   async scheduled(_controller, env, ctx) {
     const runtime = createRuntime(env, { scheduled: true });
@@ -133,6 +138,59 @@ function logError(message, error, details = {}) {
 
 function logWarn(message, error, details = {}) {
   logEvent("warn", message, details, error);
+}
+
+function normalizeRequestOrigin(request) {
+  const value = request.headers.get("Origin");
+  if (!value) {
+    return "none";
+  }
+  try {
+    return new URL(value).origin;
+  } catch {
+    return "invalid";
+  }
+}
+
+function getRequestCountry(request) {
+  const value = request.cf?.country || request.headers.get("CF-IPCountry") || "";
+  const country = String(value).toUpperCase();
+  return /^[A-Z]{2}$/.test(country) ? country : "unknown";
+}
+
+function recordApiRequest(request, response, env, durationMs) {
+  const url = new URL(request.url);
+  const origin = normalizeRequestOrigin(request);
+  const source = WEBSITE_ORIGINS.has(origin) ? "website" : "api";
+  const details = {
+    event: "api_request",
+    source,
+    path: url.pathname,
+    origin,
+    country: getRequestCountry(request),
+    method: request.method,
+    status: response.status,
+    durationMs,
+  };
+
+  // Passing an object lets Workers Logs index each field for Query Builder.
+  console.log(details);
+
+  const analytics = env?.API_ANALYTICS;
+  if (!analytics || typeof analytics.writeDataPoint !== "function") {
+    return;
+  }
+  try {
+    analytics.writeDataPoint({
+      // blob1..6: source, path, origin, country, method, response status.
+      blobs: [source, url.pathname, origin, details.country, request.method, String(response.status)],
+      // double1..2: request count, duration in milliseconds.
+      doubles: [1, durationMs],
+      indexes: [source],
+    });
+  } catch (error) {
+    logWarn("Failed to record API analytics", error, { source, pathname: url.pathname });
+  }
 }
 
 function createErrorResponse(error, headers, context) {
