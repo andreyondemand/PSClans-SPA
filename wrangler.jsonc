@@ -27,6 +27,12 @@
       }
     }
   ],
+  "analytics_engine_datasets": [
+    {
+      "binding": "API_ANALYTICS",
+      "dataset": "psclans_api_requests"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "D1_DB",

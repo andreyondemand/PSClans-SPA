@@ -107,8 +107,46 @@ Client-side behavior to reduce API volume:
 ## Worker deployment
 
 The Worker requires a Cloudflare D1 database bound as `D1_DB`. The checked-in
-`wrangler.jsonc` targets the existing production database, rate limiter, and
-one-minute cron.
+`wrangler.jsonc` targets the existing production database, rate limiter,
+Analytics Engine dataset, and one-minute cron.
+
+### API request analytics
+
+Every HTTP request emits a structured `api_request` event to Workers Logs and a
+data point to the `psclans_api_requests` Analytics Engine dataset. Requests with
+the exact browser `Origin` `https://andreyondemand.github.io` are classified as
+`website`; all other requests are classified as `api`. Origin headers can be
+spoofed, so this classification is useful for traffic analytics, not access
+control.
+
+The Analytics Engine columns are:
+
+- `blob1` source (`website` or `api`)
+- `blob2` path
+- `blob3` origin (`none` when the header is absent)
+- `blob4` country
+- `blob5` HTTP method
+- `blob6` response status
+- `double1` request count (`1`)
+- `double2` response duration in milliseconds
+
+For a quick dashboard view, open the Worker's **Observability** page, filter
+custom logs to `event = api_request`, select **Count**, and group by `source`.
+Group by `path`, `country`, or `origin` for additional breakdowns.
+
+Analytics Engine retains a longer queryable series. This query returns the
+percentage of website and direct API traffic over the last seven days while
+accounting for Analytics Engine sampling:
+
+```sql
+SELECT
+  round(100 * sumIf(_sample_interval, blob1 = 'website') / sum(_sample_interval), 2)
+    AS website_percent,
+  round(100 * sumIf(_sample_interval, blob1 = 'api') / sum(_sample_interval), 2)
+    AS api_percent
+FROM psclans_api_requests
+WHERE timestamp >= NOW() - INTERVAL '7' DAY
+```
 
 > [!CAUTION]
 > The root Wrangler configuration points at production. Do not run `--remote`,
